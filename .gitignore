@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# Generated pipeline artifacts
+timestamps.txt
+*_highlights.edl
+
+# Local config
+.killcutter.toml
+
+# Claude Code project files
+.claude/

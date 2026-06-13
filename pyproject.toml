@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "killcutter"
+version = "1.0.0"
+description = "Detect CoD kills from the ENEMY DOWNED banner and build a Premiere-ready highlight EDL."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "opencv-python>=4.5",
+    "numpy>=1.21",
+    "pytesseract>=0.3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+killcutter = "killcutter.cli:run"
+
+[tool.setuptools]
+packages = ["killcutter", "killcutter.ui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
