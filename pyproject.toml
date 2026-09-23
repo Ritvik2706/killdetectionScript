@@ -17,12 +17,17 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+gui = ["Pillow>=10"]
+build = ["pyinstaller>=6.6"]
 
 [project.scripts]
 killcutter = "killcutter.cli:run"
 
-[tool.setuptools]
-packages = ["killcutter", "killcutter.ui"]
+[project.gui-scripts]
+killcutter-desktop = "killcutter.gui.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["killcutter*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -102,7 +102,7 @@ def write_default(path=None) -> str:
               + ui.paint(f"Config already present: {path}", ui.WHITE))
         return path
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(DEFAULT_TOML)
     print(ui.badge("WROTE", bg=ui.GREEN) + " " + ui.paint(path, ui.WHITE))
     return path
@@ -116,7 +116,7 @@ def save_updates(path, updates):
     from pathlib import Path
 
     target = Path(path).expanduser()
-    source = target.read_text() if target.exists() else DEFAULT_TOML
+    source = target.read_text(encoding="utf-8") if target.exists() else DEFAULT_TOML
     # Never overwrite a malformed file with guessed settings.
     tomllib.loads(source)
     for section_name, values in updates.items():

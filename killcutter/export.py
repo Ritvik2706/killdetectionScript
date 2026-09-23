@@ -17,7 +17,7 @@ from killcutter.timecode import drift_seconds, resolve_fps, seconds_to_timecode
 def read_timestamps(path) -> list:
     """Parse a ``timestamps.txt`` (``start end name...`` per line) into clips."""
     clips = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split()
             if len(parts) < 2:

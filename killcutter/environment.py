@@ -78,7 +78,7 @@ def configure_tesseract() -> bool:
 def _version_of(path) -> str:
     try:
         out = subprocess.run([path, "--version"], capture_output=True, text=True,
-                             timeout=10)
+                             timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         first = (out.stdout or out.stderr).strip().splitlines()
         return first[0] if first else "unknown version"
     except Exception:

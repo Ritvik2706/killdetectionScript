@@ -119,3 +119,12 @@ input/output collisions, writes text atomically, and optionally renders MP4 clip
 through FFmpeg. FFmpeg is required only when rendering is requested. CLI flags
 continue to override saved settings. Detection remains independent of UI and
 rendering concerns.
+
+
+## Desktop GUI
+
+The optional `killcutter.gui` package owns the native desktop interface. Core
+modules never import Tk. Worker threads publish data to a queue; the main thread
+polls it and updates widgets. `detection.detect(cancelled=callable)` provides
+cooperative cancellation without coupling the detector to a UI toolkit. See
+[DESKTOP.md](DESKTOP.md) for the module map, packaging and calibration roadmap.

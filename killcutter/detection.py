@@ -261,12 +261,15 @@ def _samples(cap, duration, check_interval):
 # ── Main entry ──────────────────────────────────────────────────────────────────
 
 def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
-           region_override=None, start=0.0, limit=None, end=None):
+           region_override=None, start=0.0, limit=None, end=None, cancelled=None):
     """Scan ``video_path``; return ``(clips, completed)``.
 
     ``completed`` is False when the user interrupted the scan, in which case the
     clips found so far are still returned — a two-hour scan should never throw
     away its work because you pressed Ctrl-C near the end.
+
+    ``cancelled`` is an optional zero-argument callback for desktop workers.
+    When it returns True at a sample boundary, partial clips are returned.
 
     Raises :class:`VideoError` if the file can't be opened or has no frame rate.
     """
@@ -323,6 +326,8 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
         if start:
             cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000.0)
         for elapsed, frame in _samples(cap, duration, check_interval):
+            if cancelled is not None and cancelled():
+                raise KeyboardInterrupt
             if elapsed < start:
                 continue
             if elapsed >= scan_end:

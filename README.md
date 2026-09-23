@@ -2,6 +2,19 @@
 Detect every kill in a CoD recording and assemble the highlights into a
 Premiere Pro–ready EDL — in one command.
 
+## Desktop app
+
+The new **Killcutter Studio** desktop foundation runs on Linux and Windows:
+
+```bash
+.venv/bin/python -m killcutter.gui
+```
+
+It includes frame preview and scrubbing, analysis range selection, background
+scanning, highlight review/export, folder settings, and a pixel inspector.
+See [Desktop setup and architecture](docs/DESKTOP.md) for Windows launch commands,
+native packaging, and extension points. The terminal workflow below still works.
+
 ---
 
 ## How it works

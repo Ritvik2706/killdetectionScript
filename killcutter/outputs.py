@@ -42,7 +42,8 @@ def render_clips(video_path, clips, directory, *, progress=None):
                 '-t', str(clip.duration), '-map', '0:v:0', '-map', '0:a?',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
                 '-c:a', 'aac', '-movflags', '+faststart', temp,
-            ], capture_output=True, text=True)
+            ], capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if result.returncode:
                 raise VideoError(f"Could not render {target.name}: {result.stderr.strip()}")
             os.replace(temp, target)
