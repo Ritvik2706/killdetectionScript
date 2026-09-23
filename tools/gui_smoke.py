@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from PIL import ImageGrab
 from killcutter.gui.app import Application
+from killcutter.models import Clip
 
 
 def pump(app, predicate=lambda: False, seconds=1):
@@ -28,6 +29,7 @@ def capture(app, path):
 def main():
     folder = Path(tempfile.mkdtemp(prefix='killcutter-gui-'))
     app = Application(config_path=str(folder / 'config.toml'))
+    app.overrideredirect(True)  # deterministic dimensions even under tiling window managers
     app.geometry('1320x860+30+30')
     try:
         pump(app)
@@ -52,6 +54,28 @@ def main():
         app.mark_in()
         assert app._range()[0] == 1
         capture(app, folder / 'recording.png')
+        app.working = 'scan'
+        app.scan_started = time.monotonic()
+        app.jobs.events.put(('highlight', (0, 1, Clip(.5, 2, 'Player One'), False), None))
+        app.jobs.events.put(('highlight', (0, 1.5, Clip(.5, 2.5, 'Player One, Player Two'), True), None))
+        app.jobs.events.put(('progress', (.5, 1, 4), None))
+        pump(app, lambda: bool(app.state.clips))
+        assert app.live_table.item('0', 'values') == ('Player One, Player Two',)
+        capture(app, folder / 'live-analysis.png')
+        app.working = None
+        app.show('results')
+        app.table.selection_set('0')
+        capture(app, folder / 'highlights.png')
+        app.show('workspace')
+        app.geometry('980x680+30+30')
+        capture(app, folder / 'compact.png')
+        form = app.pages['workspace'].winfo_children()[0]
+        form.canvas.yview_moveto(1)
+        pump(app, seconds=.2)
+        assert app.scan_button.winfo_rooty() + app.scan_button.winfo_height() < app.winfo_rooty() + app.winfo_height()
+        capture(app, folder / 'compact-controls.png')
+        form.canvas.yview_moveto(0)
+        app.geometry('1320x860+30+30')
         app.show('inspector')
         app.inspect_pixel(100, 100, (30, 100, 180))
         assert app.sample['x'] == 100
@@ -60,7 +84,7 @@ def main():
         app.save_settings()
         assert (folder / 'config.toml').exists()
         capture(app, folder / 'settings.png')
-        print(f'PASS: import, frame seek, range, inspector, saved settings. Screenshots: {folder}')
+        print(f'PASS: import, frame seek, range, live merge, highlights, compact layout, inspector, saved settings. Screenshots: {folder}')
     finally:
         app.exported = True
         app.working = None

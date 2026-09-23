@@ -1,4 +1,4 @@
-# Killcutter Studio desktop foundation
+# Killcutter Studio desktop
 
 A native Python/Tk desktop interface for Linux and Windows. It uses Road Trip's
 visual vocabulary (dark layered surfaces, a sidebar, restrained blue accents)
@@ -72,10 +72,19 @@ only for MP4 rendering. Settings → Check environment reports dependencies.
    frame's nominal duration. Input accepts seconds, MM:SS, or HH:MM:SS.
 3. **Analyze** runs the existing ENEMY DOWNED detector in a worker. **Stop**
    cooperatively stops at a sample boundary and keeps partial results in memory.
-   The window stays open so you can review and export them.
+   The window stays open so you can review and export them. The live analysis
+   panel shows player names immediately, updates merged highlights in place,
+   and reports progress, elapsed time, scan position, and estimated time remaining.
+   **Follow scan frames** updates the preview once per second; turn it off to
+   reduce extra decoding work. The preview is sampled, not real-time playback.
+   Detected highlights also remain available if a scan encounters an error.
 4. **Highlights** lists actual scan results. All are initially selected. Use
    Ctrl/Shift to change the selection, double-click to seek to a clip, or export
    selected rows as timestamps, a Premiere EDL, or H.264/AAC MP4 clips.
+   Search player names with Ctrl+F, click column headings to sort, and use
+   **Copy** for clipboard timestamps. Selection stays tied to the same clips
+   when sorting. Select all applies to the visible search results; exports remain
+   in chronological order. The selection summary shows count and total duration.
    Nothing is exported automatically. Exporting only some rows does not mark
    the other rows as saved. Closing or replacing unexported results prompts.
 5. **Settings** saves independent input, timestamp, EDL and MP4 directories,
@@ -92,6 +101,22 @@ Analysis, frame decoding, environment checks, and export happen in workers.
 Only the Tk thread owns widgets and image handles. EDL/timestamps are atomic,
 and MP4 output is replaced only after a successful render. Closing is deferred
 while an export finishes; MP4 rendering does not yet have a cancel control.
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| Ctrl+O | Open a recording |
+| Ctrl+Enter | Analyze the selected range |
+| Escape | Stop analysis and keep partial results |
+| Ctrl+1 / 2 / 3 / 4 | Recording / Highlights / Inspector / Settings |
+| Ctrl+F | Search highlights by player |
+| Ctrl+A in the highlights table | Select all visible highlights |
+| Enter in the highlights table | Preview the selected highlight |
+
+The recording controls also step one frame or five seconds in either direction.
+Cards, buttons, and input fields use antialiased rounded surfaces. Buttons and
+fields retain native Tk keyboard focus and interaction behavior.
 
 ## Native builds
 
@@ -124,6 +149,7 @@ playback can be added without replacing the detection engine.
 | `gui/app.py` | Navigation, workflow state, queue polling, native dialogs |
 | `gui/views.py` | Page layouts and bindings to application actions |
 | `gui/theme.py` | Palette, typography and widget styles |
+| `gui/surfaces.py` | Bounded corner cache and antialiased surface rendering |
 | `gui/widgets.py` | Reusable cards, preview canvas and scrollable forms |
 | `gui/state.py` | Media/workspace models and pure image-coordinate mapping |
 | `gui/services.py` | Job lifecycle, frame loading and detection reporter adapter |
@@ -147,5 +173,5 @@ python -m pytest tests/test_gui.py -q
 ```
 
 `python tools/gui_smoke.py` opens a real window, creates synthetic footage,
-exercises import/seeking/settings/inspection, and saves window screenshots in a
+exercises import/seeking/live updates/compact layout/settings/inspection, and saves window screenshots in a
 temporary directory. No game recording or OCR service is required for this test.

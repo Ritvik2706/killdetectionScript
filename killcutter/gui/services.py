@@ -1,5 +1,6 @@
 """Background work and adapters. Workers exchange data, never Tk objects."""
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from queue import Queue
 from threading import Event
 import time
@@ -59,7 +60,7 @@ class Jobs:
     def preview(self, generation, path, seconds):
         if self.preview_future:
             self.preview_future.cancel()
-        self.preview_future = self.preview_pool.submit(self._run, ('frame', generation), read_frame, (path, seconds))
+        self.preview_future = self.preview_pool.submit(self._run, ('frame', generation, seconds), read_frame, (path, seconds))
 
     def _run(self, kind, function, args):
         try:
@@ -82,18 +83,24 @@ class Reporter:
         self.events = events
         self.last = 0
         self.start = 0
+        self.last_frame = 0
+        self.index = 0
 
     def begin(self, meta):
         self.start = meta.scan_start
 
-    def frame(self, *args):
-        pass
+    def frame(self, elapsed, triggered):
+        now = time.monotonic()
+        if now - self.last_frame >= .5:
+            self.last_frame = now
+            self.events.put(('scan_position', (elapsed, triggered), None))
 
-    def kill(self, *args):
-        pass
+    def kill(self, index, at, clip):
+        self.index = index - 1
+        self.events.put(('highlight', (self.index, at, replace(clip), False), None))
 
-    def extended(self, *args):
-        pass
+    def extended(self, clip):
+        self.events.put(('highlight', (self.index, clip.end, replace(clip), True), None))
 
     def aborted(self, *args):
         pass

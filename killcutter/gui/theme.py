@@ -1,6 +1,8 @@
 """Road Trip-inspired surfaces and typography, without a runtime dependency on it."""
 import tkinter.font as font
 from tkinter import ttk
+from PIL import Image, ImageTk
+from .surfaces import rounded_surface
 
 BG = '#0E0E12'
 SIDEBAR = '#17171D'
@@ -42,4 +44,50 @@ def apply(root):
     style.map('Treeview', background=[('selected', SELECTED)], foreground=[('selected', INK)])
     style.configure('Treeview.Heading', background=FIELD, foreground=MUTED, padding=10, relief='flat')
     style.configure('Vertical.TScrollbar', background=BORDER, troughcolor=BG, borderwidth=0, arrowsize=12, arrowcolor=MUTED, bordercolor=BG, lightcolor=BORDER, darkcolor=BORDER)
+    # Image elements retain ttk's focus, keyboard, disabled and invoke behavior.
+    root.surface_images = []
+    for name, fill, hover, behind in [('TButton', FIELD, BORDER, CARD),
+                                      ('Toolbar.TButton', FIELD, BORDER, BG),
+                                      ('Primary.TButton', ACCENT, '#0071E3', BG),
+                                      ('CardPrimary.TButton', ACCENT, '#0071E3', CARD),
+                                      ('Nav.TButton', SIDEBAR, FIELD, SIDEBAR)]:
+        photos = []
+        for color, outline in [(fill, None), (hover, None), (FIELD, None),
+                               (fill, ACCENT), (SELECTED, None)]:
+            surface = rounded_surface(32, 32, 12, color, outline)
+            backdrop = Image.new('RGBA', surface.size, behind)
+            backdrop.alpha_composite(surface)
+            photo = ImageTk.PhotoImage(backdrop, master=root)
+            photos.append(photo)
+        root.surface_images.extend(photos)
+        element = name + '.rounded'
+        style.element_create(element, 'image', photos[0],
+                             ('disabled', photos[2]), ('focus', photos[3]),
+                             ('selected', photos[4]), ('active', photos[1]),
+                             border=13, padding=0, sticky='nsew')
+        style.layout(name, [(element, {'sticky': 'nsew', 'children': [
+            ('Button.padding', {'sticky': 'nsew', 'children': [
+                ('Button.label', {'sticky': 'nsew'})]})]})])
+    style.configure('CardPrimary.TButton', foreground='white')
+    style.configure('Nav.TButton', padding=(12, 12))
+    style.configure('Treeview', bordercolor=CARD, lightcolor=CARD, darkcolor=CARD)
+    style.layout('Treeview', [('Treeview.treearea', {'sticky': 'nswe'})])
+    style.configure('Horizontal.TScrollbar', background=BORDER, troughcolor=CARD,
+                    bordercolor=CARD, lightcolor=BORDER, darkcolor=BORDER, arrowcolor=MUTED,
+                    arrowsize=10)
+    style.map('Horizontal.TScale', bordercolor=[('disabled', FIELD)],
+              lightcolor=[('disabled', FIELD)], darkcolor=[('disabled', FIELD)],
+              background=[('disabled', BORDER)])
+    # Rounded fields keep the native text-selection and caret behavior.
+    fields = []
+    for outline in (BORDER, ACCENT):
+        surface = rounded_surface(28, 28, 9, FIELD, outline)
+        backdrop = Image.new('RGBA', surface.size, CARD)
+        backdrop.alpha_composite(surface)
+        fields.append(ImageTk.PhotoImage(backdrop, master=root))
+    root.surface_images.extend(fields)
+    style.element_create('Rounded.field', 'image', fields[0], ('focus', fields[1]),
+                         border=10, padding=0, sticky='nsew')
+    style.layout('TEntry', [('Rounded.field', {'sticky': 'nsew', 'children': [
+        ('Entry.padding', {'sticky': 'nsew', 'children': [('Entry.textarea', {'sticky': 'nsew'})]})]})])
     return family

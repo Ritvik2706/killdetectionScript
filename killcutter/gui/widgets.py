@@ -5,28 +5,30 @@ from PIL import Image, ImageTk
 
 from . import theme as t
 from .state import image_rect, source_pixel
+from .surfaces import rounded_surface
 
 
 class Card(tk.Frame):
-    def __init__(self, parent, padding=18, **kwargs):
+    def __init__(self, parent, padding=18, color=t.CARD, **kwargs):
         super().__init__(parent, bg=t.BG, **kwargs)
         self.background = tk.Canvas(self, bg=t.BG, highlightthickness=0)
         self.background.place(x=0, y=0, relwidth=1, relheight=1)
-        self.content = tk.Frame(self, bg=t.CARD)
+        self.color = color
+        self.content = tk.Frame(self, bg=color)
         self.content.pack(fill='both', expand=True, padx=padding, pady=padding)
         self.background.bind('<Configure>', self._draw)
 
     def _draw(self, event):
-        w, h, r = event.width - 1, event.height - 1, 16
+        self.photo = ImageTk.PhotoImage(rounded_surface(
+            event.width, event.height, 18, self.color, t.BORDER), master=self)
         self.background.delete('all')
-        self.background.create_polygon(r, 1, w-r, 1, w, 1, w, r, w, h-r, w, h,
-                                       w-r, h, r, h, 1, h, 1, h-r, 1, r, 1, 1,
-                                       smooth=True, fill=t.CARD, outline=t.BORDER)
+        self.background.create_image(0, 0, anchor='nw', image=self.photo)
+
 
 
 def label(parent, text='', *, size=10, color=t.INK, bold=False, **kwargs):
     widget = tk.Label(parent, text=text, bg=parent.cget('bg'), fg=color,
-                      font=('', size, 'bold' if bold else 'normal'), anchor='w', **kwargs)
+                      font=(parent.winfo_toplevel().family, size, 'bold' if bold else 'normal'), anchor='w', **kwargs)
     return widget
 
 
@@ -82,7 +84,7 @@ class Preview(tk.Canvas):
 
 
 class ScrollForm(tk.Frame):
-    def __init__(self, parent):
+    def __init__(self, parent, *, stretch=False):
         super().__init__(parent, bg=t.BG)
         self.canvas = tk.Canvas(self, bg=t.BG, highlightthickness=0)
         bar = ttk.Scrollbar(self, orient='vertical', command=self.canvas.yview)
@@ -92,7 +94,15 @@ class ScrollForm(tk.Frame):
         self.body = tk.Frame(self.canvas, bg=t.BG)
         self.window = self.canvas.create_window(0, 0, window=self.body, anchor='nw')
         self.body.bind('<Configure>', lambda _: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfigure(self.window, width=e.width))
+        def resize(event):
+            options = {'width': event.width}
+            if stretch:
+                options['height'] = max(self.body.winfo_reqheight(), event.height)
+            self.canvas.itemconfigure(self.window, **options)
+        self.canvas.bind('<Configure>', resize)
+        if stretch:
+            self.body.bind('<Configure>', lambda e: self.canvas.itemconfigure(
+                self.window, height=max(self.body.winfo_reqheight(), self.canvas.winfo_height())), add='+')
         self.bind_all('<MouseWheel>', self._wheel, add='+')
         self.bind_all('<Button-4>', self._wheel, add='+')
         self.bind_all('<Button-5>', self._wheel, add='+')

@@ -2,6 +2,7 @@
 from pathlib import Path
 from queue import Empty
 import json
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -10,7 +11,7 @@ from killcutter.ranges import parse_timestamp, resolve_range
 from . import theme as t
 from .services import Jobs, analyze, open_media
 from .state import Workspace
-from .widgets import label
+from .widgets import Card, label
 from .views import Views
 
 
@@ -42,6 +43,17 @@ class Application(Views, tk.Tk):
         self.exported = True
         self.exported_ids = set()
         self.exporting_ids = set()
+        self.analysis_title = tk.StringVar(value='Ready to analyze.')
+        self.live_player = tk.StringVar(value='Waiting for detections')
+        self.live_count = tk.StringVar(value='0 highlights')
+        self.live_detail = tk.StringVar(value='Player names and moments appear here as they are detected.')
+        self.follow_scan = tk.BooleanVar(value=True)
+        self.search_var = tk.StringVar()
+        self.selected_var = tk.StringVar(value='No highlights selected')
+        self.result_sort = ('in', False)
+        self.last_follow = 0
+        self.scan_started = 0
+        self.scan_position = 0
         self.status = tk.StringVar(value='Ready when you are. Open a recording to get started.')
         self.start_var = tk.StringVar(value='00:00:00.000')
         self.end_var = tk.StringVar(value='00:00:00.000')
@@ -57,16 +69,23 @@ class Application(Views, tk.Tk):
         self.show('workspace')
         self.start_var.trace_add('write', lambda *_: self._range_summary())
         self.end_var.trace_add('write', lambda *_: self._range_summary())
+        self.search_var.trace_add('write', lambda *_: self.filter_results())
         self.bind('<Control-o>', lambda _: self.open_file())
+        self.bind('<Control-Return>', lambda _: self.start_scan())
+        self.bind('<Control-f>', self.focus_search)
+        self.bind('<Escape>', lambda _: self.stop_scan() if self.working == 'scan' else None)
+        for number, page in enumerate(('workspace', 'results', 'inspector', 'settings'), 1):
+            self.bind(f'<Control-Key-{number}>', lambda _, p=page: self.show(p))
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.poll_timer = self.after(75, self._poll)
         self._update_controls()
         self.deiconify()
 
     def _build_shell(self):
-        rail = tk.Frame(self, bg=t.SIDEBAR, width=206)
-        rail.pack(side='left', fill='y', padx=(12, 0), pady=12)
-        rail.pack_propagate(False)
+        rail_card = Card(self, padding=8, color=t.SIDEBAR, width=206)
+        rail_card.pack(side='left', fill='y', padx=(12, 0), pady=12)
+        rail_card.pack_propagate(False)
+        rail = rail_card.content
         brand = tk.Canvas(rail, width=42, height=42, bg=t.SIDEBAR, highlightthickness=0)
         brand.pack(anchor='w', padx=22, pady=(26, 12))
         brand.create_rectangle(2, 2, 40, 40, fill=t.ACCENT, outline='')
@@ -79,9 +98,9 @@ class Application(Views, tk.Tk):
         for key, title in [('workspace', '01   Recording'), ('results', '02   Highlights'),
                            ('inspector', '03   Frame inspector'), ('settings', '04   Settings')]:
             button = ttk.Button(rail, text=title, style='Nav.TButton', command=lambda k=key: self.show(k))
-            button.pack(fill='x', padx=10, pady=3)
+            button.pack(fill='x', padx=2, pady=3)
             self.nav[key] = button
-        label(rail, 'LOCAL PROCESSING\nYour footage stays yours.', size=9, color=t.MUTED,
+        label(rail, 'LOCAL PROCESSING\nYour footage stays yours.\n\nCtrl+O  Open recording\nCtrl+Enter  Analyze\nEsc  Stop analysis', size=9, color=t.MUTED,
               justify='left').pack(side='bottom', anchor='w', padx=22, pady=26)
         main = tk.Frame(self, bg=t.BG)
         main.pack(side='left', fill='both', expand=True, padx=26, pady=(22, 14))
@@ -117,11 +136,12 @@ class Application(Views, tk.Tk):
 
     def show(self, key):
         titles = {
-            'workspace': ('Make every moment count.', 'Select a recording. Set your range. Find the highlights.'),
+            'workspace': ('Recording', 'Select a recording. Set your range. Find the highlights.'),
             'results': ('Your highlights.', 'Review your detections and export the moments worth keeping.'),
             'inspector': ('A closer look.', 'Inspect source pixels precisely. Build your next detection profile.'),
             'settings': ('Make it yours.', 'Saved defaults for your workflow, folders, and detection.'),
         }
+        self.current_page = key
         self.heading.configure(text=titles[key][0])
         self.subtitle.configure(text=titles[key][1])
         self.pages[key].tkraise()
@@ -189,6 +209,8 @@ class Application(Views, tk.Tk):
         self.cancel_button.state(['!disabled'] if self.working == 'scan' else ['disabled'])
         self.seek.state(['!disabled'] if loaded and not busy else ['disabled'])
         self.save_sample_button.state(['!disabled'] if self.sample and not busy else ['disabled'])
+        selected = [self.state.clips[int(i)] for i in self.table.selection() if int(i) < len(self.state.clips)]
+        self.selected_var.set(f'{len(self.table.get_children())} shown · {len(selected)} selected  ·  {clock(sum(c.duration for c in selected))} total duration')
         for index, button in enumerate(self.result_buttons):
             has_rows = bool(self.table.get_children() if index == 0 else self.table.selection())
             button.state(['!disabled'] if has_rows and not busy else ['disabled'])
@@ -249,12 +271,31 @@ class Application(Views, tk.Tk):
             return
         if self.state.clips and not self.exported and not messagebox.askyesno('Replace highlights?', 'Analyze again and replace the current unexported results?', parent=self):
             return
+        self.generation += 1
+        self.state.clips = []
+        self.state.completed = False
+        self.exported_ids.clear()
+        self.exported = True
+        self.table.delete(*self.table.get_children())
+        self.live_table.delete(*self.live_table.get_children())
+        self.search_var.set('')
+        self.live_count.set('0 highlights')
+        self.live_player.set('Waiting for detections')
+        self.analysis_title.set('Analyzing…')
+        self.live_detail.set('Looking for the ENEMY DOWNED banner…')
+        self.results_summary.configure(text='Analysis in progress')
+        self.scan_started = time.monotonic()
+        self.scan_position = start
+        self.last_follow = 0
+        self.show('workspace')
         self.progress['value'] = 0
         self._begin('scan', 'Analyzing locally… You can stop and keep partial results.')
         self.jobs.submit('scan', analyze, self.jobs, self.state.media, settings, start, end,
                          config.section(self.cfg, "detect").get("region"))
 
     def stop_scan(self):
+        if self.working != 'scan':
+            return
         self.jobs.cancel.set()
         self.status.set('Stopping after the current sample… Your detected highlights will be kept.')
         self.cancel_button.state(['disabled'])
@@ -269,23 +310,61 @@ class Application(Views, tk.Tk):
 
     def _poll(self):
         try:
-            while True:
+            for _ in range(100):
                 kind, data, error = self.jobs.events.get_nowait()
                 if isinstance(kind, tuple):
                     if kind[1] == self.generation:
                         if error:
                             self.status.set(error)
                         else:
+                            self.state.position = kind[2]
+                            self.position_var.set(clock(kind[2]))
                             self._set_frame(data)
+                    continue
+                if kind == 'scan_position':
+                    self.scan_position, triggered = data
+                    if self.working == 'scan' and self.follow_scan.get() and time.monotonic() - self.last_follow >= 1:
+                        self.last_follow = time.monotonic()
+                        self.state.position = self.scan_position
+                        self.position_var.set(clock(self.scan_position))
+                        self.seek.set(self.scan_position)
+                        self.jobs.preview(self.generation, self.state.media.path, self.scan_position)
+                    continue
+                if kind == 'highlight':
+                    index, at, clip, merged = data
+                    if index == len(self.state.clips):
+                        self.state.clips.append(clip)
+                    elif 0 <= index < len(self.state.clips):
+                        self.state.clips[index] = clip
+                    self.exported = False
+                    iid = str(index)
+                    values = (clip.name,)
+                    if self.live_table.exists(iid):
+                        self.live_table.item(iid, values=values)
+                    else:
+                        self.live_table.insert('', 'end', iid=iid, text=clock(at).split('.')[0], values=values)
+                    self.live_table.see(iid)
+                    self.live_player.set(clip.name)
+                    self.live_count.set(f"{len(self.state.clips)} highlight{'s' if len(self.state.clips) != 1 else ''}")
+                    self.results_summary.configure(text=f'Live · {len(self.state.clips)} highlights')
+                    self.filter_results()
                     continue
                 if kind == 'progress':
                     fraction, count, eta = data
                     self.progress['value'] = fraction * 100
                     remaining = f'  ·  about {int(eta)}s remaining' if eta is not None else ''
-                    self.status.set(f'Analyzing  {fraction:.0%}  ·  {count} highlights{remaining}')
+                    elapsed = max(0, time.monotonic() - self.scan_started)
+                    self.live_detail.set(f'{fraction:.0%} scanned · {int(elapsed)}s elapsed\nAt {clock(self.scan_position)}{remaining}')
+                    if not self.jobs.cancel.is_set():
+                        self.status.set(f'Analyzing  {fraction:.0%}  ·  {count} highlights{remaining}')
                     continue
                 self.working = None
+                if kind == 'scan':
+                    self.analysis_title.set('Analysis interrupted' if error else 'Ready to analyze.')
                 if error:
+                    if kind == 'scan':
+                        self.results_summary.configure(text=f'Interrupted · {len(self.state.clips)} highlights retained')
+                        self.live_detail.set('Analysis interrupted. Detected highlights are available for review.')
                     self.error('Operation could not finish', error)
                 elif kind == 'open':
                     media, image = data
@@ -294,6 +373,13 @@ class Application(Views, tk.Tk):
                     self.exported_ids.clear()
                     self.table.delete(*self.table.get_children())
                     self.results_summary.configure(text='No highlights yet')
+                    self.live_table.delete(*self.live_table.get_children())
+                    self.live_count.set('0 highlights')
+                    self.live_player.set('Waiting for detections')
+                    self.analysis_title.set('Ready to analyze.')
+                    self.live_detail.set('Ready. Player names will appear during analysis.')
+                    self.progress['value'] = 0
+                    self.search_var.set('')
                     self.source_var.set(f'{media.name}   ·   {media.width} × {media.height}   ·   {media.fps:g} fps')
                     self.seek.configure(to=max(0, media.duration - 1/media.fps))
                     self.seek.set(0)
@@ -305,16 +391,16 @@ class Application(Views, tk.Tk):
                     self.state.clips, self.state.completed = data
                     self.exported = not bool(self.state.clips)
                     self.exported_ids.clear()
-                    self.table.delete(*self.table.get_children())
-                    for i, clip in enumerate(self.state.clips):
-                        self.table.insert('', 'end', iid=str(i), values=(clip.name, clock(clip.start), clock(clip.end), f'{clip.duration:.2f}s'))
+                    self.filter_results()
                     self.table.selection_set(self.table.get_children())
                     total = sum(c.duration for c in self.state.clips)
                     prefix = '' if self.state.completed else 'Partial results · '
                     self.results_summary.configure(text=f'{prefix}{len(self.state.clips)} highlights  /  {clock(total)}')
+                    self.live_count.set(f"{len(self.state.clips)} highlight{'s' if len(self.state.clips) != 1 else ''}")
+                    self.live_detail.set('Analysis complete. Review and export your highlights.' if self.state.completed else 'Stopped. Your partial results are ready to review.')
                     if self.state.completed:
                         self.progress['value'] = 100
-                    self.status.set('Scan finished. Select highlights to export.' if self.state.clips else 'No highlights found in this range. Check the HUD layout or try another section.')
+                    self.status.set(('Scan finished. Select highlights to export.' if self.state.completed else 'Scan stopped. Partial highlights are ready to export.') if self.state.clips else 'No highlights found in this range. Check the HUD layout or try another section.')
                     self.show('results')
                 elif kind == 'export':
                     self.exported_ids.update(self.exporting_ids)
@@ -326,6 +412,70 @@ class Application(Views, tk.Tk):
         except Empty:
             pass
         self.poll_timer = self.after(75, self._poll)
+
+    def step(self, amount, *, frames=False):
+        if not self.state.media or self.working:
+            return
+        delta = amount / self.state.media.fps if frames else amount
+        position = min(max(0, self.state.position + delta),
+                       self.state.media.duration - 1 / self.state.media.fps)
+        self.seek.set(position)
+        self._seek_changed(position)
+
+    def focus_search(self, event=None):
+        self.show('results')
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, 'end')
+        return 'break'
+
+    def select_all_results(self, event=None):
+        self.table.selection_set(self.table.get_children())
+        return 'break'
+
+    def filter_results(self):
+        selected = set(self.table.selection())
+        self.table.delete(*self.table.get_children())
+        query = self.search_var.get().strip().casefold()
+        column, reverse = self.result_sort
+        keys = {'player': lambda pair: pair[1].name.casefold(), 'in': lambda pair: pair[1].start,
+                'out': lambda pair: pair[1].end, 'duration': lambda pair: pair[1].duration}
+        for row, (i, clip) in enumerate(sorted(enumerate(self.state.clips), key=keys[column], reverse=reverse)):
+            if query and query not in clip.name.casefold():
+                continue
+            self.table.insert('', 'end', iid=str(i),
+                              values=(clip.name, clock(clip.start), clock(clip.end), f'{clip.duration:.2f}s'),
+                              tags=('alternate',) if row % 2 else ())
+            if str(i) in selected:
+                self.table.selection_add(str(i))
+        self._update_controls()
+
+    def sort_results(self, column):
+        previous, descending = self.result_sort
+        self.result_sort = (column, not descending if column == previous else False)
+        for name, title in [('player', 'PLAYER / MOMENT'), ('in', 'IN'), ('out', 'OUT'), ('duration', 'DURATION')]:
+            arrow = (' ↓' if self.result_sort[1] else ' ↑') if name == column else ''
+            self.table.heading(name, text=title + arrow)
+        self.filter_results()
+
+    def copy_selection(self):
+        clips = [self.state.clips[int(i)] for i in sorted(self.table.selection(), key=int)]
+        if not clips:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(''.join(f'{c.start:.3f} {c.end:.3f} {c.name}\n' for c in clips))
+        self.status.set(f'Copied {len(clips)} highlight timestamps to the clipboard.')
+
+    def describe_live(self, event=None):
+        selection = self.live_table.selection()
+        if selection:
+            self.live_player.set(self.state.clips[int(selection[0])].name)
+
+    def preview_live(self, event=None):
+        selection = self.live_table.selection()
+        if selection and not self.working:
+            self.search_var.set('')
+            self.table.selection_set(selection[0])
+            self.preview_result()
 
     def preview_result(self):
         if not self.table.selection() or self.working:

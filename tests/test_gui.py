@@ -159,3 +159,68 @@ def test_desktop_utf8_output_roundtrip(tmp_path):
     timestamps = tmp_path / 'timestamps.txt'
     outputs.atomic_text(timestamps, '10.000 15.000 joueur_é\n')
     assert export.read_timestamps(timestamps) == [Clip(10, 15, 'joueur_é')]
+
+
+def test_reporter_emits_snapshot_and_merge_events():
+    from queue import Queue
+    reporter = Reporter(Queue())
+    clip = Clip(10, 15, 'Alpha')
+    reporter.kill(1, 12, clip)
+    clip.name = 'Alpha, Beta'
+    reporter.extended(clip)
+    first = reporter.events.get_nowait()
+    second = reporter.events.get_nowait()
+    assert first == ('highlight', (0, 12, Clip(10, 15, 'Alpha'), False), None)
+    assert second == ('highlight', (0, 15, clip, True), None)
+    assert first[1][2] is not clip
+
+
+def test_reporter_throttles_position_events(monkeypatch):
+    from queue import Queue
+    from killcutter.gui import services
+    monkeypatch.setattr(services.time, 'monotonic', lambda: 10)
+    reporter = Reporter(Queue())
+    for at in range(100):
+        reporter.frame(at, False)
+    assert reporter.events.qsize() == 1
+    assert reporter.events.get_nowait() == ('scan_position', (0, False), None)
+
+
+def test_gui_live_merge_search_sort_and_copy(app):
+    app.working = 'scan'
+    app.jobs.events.put(('highlight', (0, 12, Clip(10, 15, 'Alpha'), False), None))
+    app.jobs.events.put(('highlight', (0, 18, Clip(10, 23, 'Alpha, Beta'), True), None))
+    app.jobs.events.put(('highlight', (1, 32, Clip(30, 35, 'Gamma'), False), None))
+    pump(app, lambda: len(app.state.clips) == 2)
+    assert app.working == 'scan'
+    assert app.live_table.item('0', 'values') == ('Alpha, Beta',)
+    assert len(app.live_table.get_children()) == 2
+    assert app.table.item('0', 'values')[2] == '00:00:23.000'
+    app.working = None
+    app.search_var.set('BETA')
+    assert app.table.get_children() == ('0',)
+    app.select_all_results()
+    app.copy_selection()
+    assert app.clipboard_get() == '10.000 23.000 Alpha, Beta\n'
+    app.search_var.set('')
+    app.sort_results('duration')
+    assert app.table.get_children() == ('1', '0')
+    app.table.selection_set('1')
+    app.sort_results('duration')
+    assert app.table.selection() == ('1',)
+    assert not app.exported
+
+
+def test_gui_scan_error_retains_live_results(app, monkeypatch):
+    errors = []
+    monkeypatch.setattr(app, 'error', lambda *args: errors.append(args))
+    app.working = 'scan'
+    app.jobs.events.put(('highlight', (0, 12, Clip(10, 15, 'Alpha'), False), None))
+    app.jobs.events.put(('scan', None, 'Decoder failed'))
+    pump(app, lambda: app.working is None)
+    assert app.state.clips == [Clip(10, 15, 'Alpha')]
+    assert 'retained' in app.results_summary.cget('text')
+    app.table.selection_set('0')
+    app._update_controls()
+    assert not app.result_buttons[1].instate(['disabled'])
+    assert errors
