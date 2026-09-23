@@ -43,3 +43,72 @@ def test_blocking_failures_only_counts_required_checks():
     soft = environment.Check("y", False, "", required=False)
     hard = environment.Check("z", False, "")
     assert environment.blocking_failures([ok, soft, hard]) == [hard]
+
+
+def _os_release(tmp_path, monkeypatch, text):
+    path = tmp_path / "os-release"
+    path.write_text(text)
+    real = open
+
+    def fake_open(name, *args, **kwargs):
+        if name == "/etc/os-release":
+            return real(path, *args, **kwargs)
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(environment.platform, "system", lambda: "Linux")
+
+
+def test_platform_family_reads_os_release(tmp_path, monkeypatch):
+    _os_release(tmp_path, monkeypatch, 'ID=arch\nNAME="Arch Linux"\n')
+    assert environment.platform_family() == "arch"
+
+
+def test_platform_family_falls_back_to_id_like(tmp_path, monkeypatch):
+    _os_release(tmp_path, monkeypatch, 'ID=pika\nID_LIKE="ubuntu debian"\n')
+    assert environment.platform_family() == "debian"
+
+
+def test_platform_family_unknown_distro_is_generic(tmp_path, monkeypatch):
+    _os_release(tmp_path, monkeypatch, "ID=plan9\n")
+    assert environment.platform_family() == "linux"
+
+
+def test_install_command_prefers_distro_when_pip_is_blocked(monkeypatch):
+    monkeypatch.setattr(environment, "platform_family", lambda: "arch")
+    monkeypatch.setattr(environment, "pip_is_blocked", lambda: True)
+    assert environment.install_command("pytesseract") == (
+        "sudo pacman -S --needed python-pytesseract")
+    monkeypatch.setattr(environment, "pip_is_blocked", lambda: False)
+    assert "pip install pytesseract" in environment.install_command("pytesseract")
+
+
+def test_install_command_for_binaries_never_uses_pip(monkeypatch):
+    monkeypatch.setattr(environment, "platform_family", lambda: "debian")
+    monkeypatch.setattr(environment, "pip_is_blocked", lambda: False)
+    assert environment.install_command("tesseract") == "sudo apt install tesseract-ocr"
+    assert environment.install_command("ffmpeg") == "sudo apt install ffmpeg"
+
+
+def test_install_command_unknown_linux_still_says_something(monkeypatch):
+    monkeypatch.setattr(environment, "platform_family", lambda: "linux")
+    monkeypatch.setattr(environment.platform, "system", lambda: "Linux")
+    assert environment.install_command("tesseract") == environment.INSTALL_HINT["Linux"]
+
+
+def test_setup_steps_only_covers_failures(monkeypatch):
+    monkeypatch.setattr(environment, "platform_family", lambda: "arch")
+    monkeypatch.setattr(environment, "pip_is_blocked", lambda: True)
+    results = [
+        environment.Check("Python", True, "3.13"),
+        environment.Check("NumPy", True, "2.0"),
+        environment.Check("Tesseract OCR", False, "not found"),
+        environment.Check("FFmpeg", False, "not installed", required=False),
+    ]
+    steps = environment.setup_steps(results)
+    assert [label for label, _ in steps] == ["Tesseract OCR", "FFmpeg  (optional)"]
+    assert steps[0][1] == "sudo pacman -S --needed tesseract tesseract-data-eng"
+
+
+def test_setup_steps_empty_when_ready():
+    assert environment.setup_steps([environment.Check("Tesseract OCR", True, "5.5")]) == []

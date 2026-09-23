@@ -92,3 +92,23 @@ def test_home_help_uses_page_and_preserves_menu_selection(monkeypatch):
     assert workspace.home({}, None, Mock(), {}) == 0
     assert page.call_args.args[0] == 'HELP'
     assert choose.call_args.args[2] == 3
+
+
+def test_home_opens_setup_when_a_dependency_is_missing(monkeypatch):
+    monkeypatch.setattr(environment, 'check',
+                        Mock(return_value=[environment.Check('Tesseract OCR', False, 'not found')]))
+    setup = Mock(return_value=None)
+    monkeypatch.setattr(workspace, 'environment_page', setup)
+    monkeypatch.setattr(workspace, 'choose', Mock(return_value=None))
+    assert workspace._home({}, None, Mock(), {}) == 0
+    assert setup.call_count == 1
+
+
+def test_home_skips_setup_when_ready(monkeypatch):
+    monkeypatch.setattr(environment, 'check',
+                        Mock(return_value=[environment.Check('Tesseract OCR', True, '5.5')]))
+    setup = Mock()
+    monkeypatch.setattr(workspace, 'environment_page', setup)
+    monkeypatch.setattr(workspace, 'choose', Mock(return_value=None))
+    assert workspace._home({}, None, Mock(), {}) == 0
+    setup.assert_not_called()

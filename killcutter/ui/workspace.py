@@ -222,6 +222,26 @@ def scan_setup(args, cfg):
             args.clips_output_dir = str(Path(ask("MP4 output folder", args.clips_output_dir)).expanduser())
 
 
+def _setup_lines(checks):
+    """The 'here is what you must do' block, or [] when nothing is missing."""
+    steps = environment.setup_steps(checks)
+    if not steps:
+        return []
+    lines = ["", ui.paint("SETUP · RUN THESE COMMANDS", ui.TEAL, bold=True), "",
+             ui.paint(f"Detected {environment.platform_family()}. "
+                      "Copy each line into a terminal, then press r to re-check.",
+                      ui.GREY), ""]
+    for label, command in steps:
+        lines.append(ui.paint(f"   {label}", ui.WHITE, bold=True))
+        lines.append(ui.paint(f"   $ {command}", ui.LIME))
+    if environment.pip_is_blocked():
+        lines.extend(["", ui.paint(
+            "   This Python refuses 'pip install' (managed by your distro), so the "
+            "commands above use your package manager. A virtualenv or pipx works too.",
+            ui.GREY)])
+    return lines
+
+
 def environment_page(cfg, cfg_path):
     while True:
         screens.clear()
@@ -245,8 +265,10 @@ def environment_page(cfg, cfg_path):
             if check.fix:
                 fix = "Open Settings to customize your defaults." if check.name == "Config" else check.fix
                 lines.append(ui.paint("   " + fix, ui.GREY))
-        action = screens.page("ENVIRONMENT", lines, subtitle="Dependencies, recording locations, and optional tools.",
-                              actions=[("r", "refresh"), ("s", "settings")])
+        lines.extend(_setup_lines(checks))
+        action = screens.page("SETUP & ENVIRONMENT", lines,
+                              subtitle="Dependencies, recording locations, and optional tools.",
+                              actions=[("r", "re-check"), ("s", "settings")])
         if action == "r":
             continue
         return action
@@ -294,12 +316,16 @@ def home(cfg, cfg_path, parser_factory, commands, *, no_color=False):
 
 
 def _home(cfg, cfg_path, parser_factory, commands, *, no_color=False):
+    # A missing dependency is not worth discovering halfway through a scan, so
+    # open the setup page first when the machine cannot run one yet.
+    if environment.blocking_failures(environment.check()):
+        environment_page(cfg, cfg_path)
     cursor = 0
     while True:
         action = choose("KILLCUTTER · recording → highlights", [
             "New scan        Select a recording and analysis range",
             "Settings        Detection, export and appearance",
-            "Environment     Check dependencies and recordings folder",
+            "Setup           Check dependencies and recordings folder",
             "Help            Workflow and keyboard shortcuts",
             "Export EDL      Build from an existing timestamps file",
             "Quit",
