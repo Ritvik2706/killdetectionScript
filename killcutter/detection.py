@@ -13,6 +13,7 @@ returning the list of :class:`~killcutter.models.Clip` it found. Anything that
 prints lives in the reporter, so the algorithm stays testable and readable.
 """
 
+import math
 import difflib
 import os
 import re
@@ -25,6 +26,7 @@ import pytesseract
 from killcutter import constants, hud as hud_mod
 from killcutter.errors import ConfigError, DependencyError, VideoError
 from killcutter.models import Clip
+from killcutter.ranges import resolve_range
 
 
 @dataclass
@@ -41,7 +43,7 @@ class DetectionSettings:
 
 def validate(settings: DetectionSettings) -> None:
     """Reject settings that would silently produce nonsense."""
-    if settings.rate <= 0:
+    if not math.isfinite(settings.rate) or settings.rate <= 0:
         raise ConfigError(f"--rate must be greater than 0 (got {settings.rate:g}).")
     if settings.rate > 60:
         raise ConfigError(f"--rate above 60 samples/sec is pointless (got "
@@ -50,7 +52,7 @@ def validate(settings: DetectionSettings) -> None:
                         ("--end-offset", settings.end_offset),
                         ("--merge-gap", settings.merge_gap),
                         ("--cooldown", settings.cooldown)):
-        if value < 0:
+        if not math.isfinite(value) or value < 0:
             raise ConfigError(f"{name} cannot be negative (got {value:g}).")
     if len(settings.region) != 4 or any(v < 0 for v in settings.region):
         raise ConfigError(f"--region must be four non-negative numbers "
@@ -70,6 +72,8 @@ class DetectionMeta:
     total_checks: int
     dry_run: bool
     layout: str = ""
+    scan_start: float = 0.0
+    scan_end: float = 0.0
 
 
 # ── Pixel pre-checks ────────────────────────────────────────────────────────────
@@ -257,7 +261,7 @@ def _samples(cap, duration, check_interval):
 # ── Main entry ──────────────────────────────────────────────────────────────────
 
 def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
-           region_override=None, start=0.0, limit=None):
+           region_override=None, start=0.0, limit=None, end=None):
     """Scan ``video_path``; return ``(clips, completed)``.
 
     ``completed`` is False when the user interrupted the scan, in which case the
@@ -289,8 +293,11 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
     settings.region = hud.region
 
     duration = _measure_duration(cap, total_frames, fps)
-    start = max(0.0, min(start or 0.0, max(0.0, duration - 1)))
-    scan_end = min(duration, start + limit) if limit else duration
+    try:
+        start, scan_end = resolve_range(duration, start, limit, end)
+    except ConfigError:
+        cap.release()
+        raise
     check_interval = 1.0 / settings.rate
     total_checks = int(max(0.0, scan_end - start) / check_interval) + 1
 
@@ -298,7 +305,7 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
         source=os.path.basename(video_path), fps=fps, duration=duration,
         total_frames=total_frames, region=settings.region, settings=settings,
         total_checks=total_checks, dry_run=dry_run,
-        layout=hud_mod.describe(hud),
+        layout=hud_mod.describe(hud), scan_start=start, scan_end=scan_end,
     )
     reporter.begin(meta)
 
@@ -316,6 +323,8 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
         if start:
             cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000.0)
         for elapsed, frame in _samples(cap, duration, check_interval):
+            if elapsed < start:
+                continue
             if elapsed >= scan_end:
                 break
             done += 1
@@ -350,8 +359,8 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
                         # ``elapsed`` is when we *noticed*; the kill landed a
                         # little earlier (see BANNER_RAMP_SECONDS). Cut around
                         # the kill, so --offset means what it says.
-                        kill_at = max(0.0, elapsed - _notice_lag(settings.rate))
-                        cut_end = min(duration, kill_at + settings.end_offset)
+                        kill_at = max(start, elapsed - _notice_lag(settings.rate))
+                        cut_end = min(scan_end, kill_at + settings.end_offset)
                         if clips and (elapsed - last_kill) <= settings.merge_gap:
                             prev = clips[-1]
                             clips[-1] = Clip(prev.start, cut_end,
@@ -359,13 +368,15 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
                             reporter.extended(clips[-1])
                         else:
                             clips.append(
-                                Clip(max(0.0, kill_at - settings.offset), cut_end, name))
+                                Clip(max(start, kill_at - settings.offset), cut_end, name))
                             reporter.kill(len(clips), kill_at, clips[-1])
                         last_kill = elapsed
                         last_name = name
                         banner_cleared = False
 
             if settings.preview and _preview(roi, player):
+                completed = False
+                reporter.aborted(elapsed, scan_end, len(clips))
                 break
 
             reporter.progress(done, total_checks, elapsed, scan_end, len(clips), eta)

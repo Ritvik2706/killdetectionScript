@@ -81,6 +81,7 @@ def _duration_label(path) -> str:
 
 def list_clips(clips_dir) -> list:
     """Newest-first list of playable clips in ``clips_dir`` with metadata."""
+    clips_dir = os.path.expanduser(clips_dir)
     if not os.path.isdir(clips_dir):
         raise VideoError(f"Clips folder not found: {clips_dir}")
 

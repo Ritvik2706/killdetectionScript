@@ -103,3 +103,19 @@ everywhere at once.
 - `test_export` — `read_timestamps`, EDL header/events, contiguous records
 - `test_config` — write/load roundtrip, no-clobber, missing file
 - `test_selector` — fuzzy matching and the picker `_State` transitions
+
+## Interactive workspace and destinations
+
+`ui/workspace.py` provides the home screen, settings draft editor, and guided
+scan setup using the existing picker. It builds ordinary CLI argument namespaces
+and dispatches the same command handlers as scripted usage. No additional UI
+framework is required. `ranges.py` parses human-readable times and validates
+source-time ranges shared by setup and detection; highlight boundaries are
+clamped to that range.
+
+`config.save_updates()` updates known scalar settings atomically while retaining
+unrelated configuration. `outputs.py` resolves destination filenames, rejects
+input/output collisions, writes text atomically, and optionally renders MP4 clips
+through FFmpeg. FFmpeg is required only when rendering is requested. CLI flags
+continue to override saved settings. Detection remains independent of UI and
+rendering concerns.

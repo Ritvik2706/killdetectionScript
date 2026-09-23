@@ -32,6 +32,11 @@ DEFAULT_TOML = """\
 # places (~/Videos/Clips/Warzone, ~/Videos, ~/Movies, %USERPROFILE%\\Videos).
 # clips_dir   = "D:/Videos/Clips/Warzone"
 
+# Separate destinations; empty means the current working directory.
+timestamps_dir = ""
+clips_output_dir = "highlights"
+render_clips = false     # optional MP4 rendering requires FFmpeg
+
 offset      = 5          # seconds before the kill for the clip start
 end_offset  = 5          # seconds after the kill for the clip end
 merge_gap   = 10         # merge kills closer than this into one clip
@@ -46,6 +51,7 @@ export      = true       # auto-run the highlight exporter when detection ends
 # region    = [1598, 186, 189, 45]   # x, y, w, h
 
 [export]
+output_dir = ""         # destination for EDL files
 # Leave fps unset: the real rate is read from the file. Only force it if your
 # Premiere sequence must stay at a rate the footage is not (see the README).
 # fps  = 59.94
@@ -100,3 +106,48 @@ def write_default(path=None) -> str:
         f.write(DEFAULT_TOML)
     print(ui.badge("WROTE", bg=ui.GREEN) + " " + ui.paint(path, ui.WHITE))
     return path
+
+
+def save_updates(path, updates):
+    """Atomically update scalar settings, preserving comments and unknown options."""
+    import json
+    import re
+    import tempfile
+    from pathlib import Path
+
+    target = Path(path).expanduser()
+    source = target.read_text() if target.exists() else DEFAULT_TOML
+    # Never overwrite a malformed file with guessed settings.
+    tomllib.loads(source)
+    for section_name, values in updates.items():
+        for key, value in values.items():
+            literal = json.dumps(value, ensure_ascii=False)
+            lines = source.splitlines()
+            header = f"[{section_name}]"
+            begin = next((i for i, line in enumerate(lines)
+                          if line.split('#', 1)[0].strip() == header), None)
+            if begin is None:
+                lines.extend(["", header, f"{key} = {literal}"])
+            else:
+                finish = next((i for i in range(begin + 1, len(lines))
+                               if lines[i].lstrip().startswith("[")), len(lines))
+                match = next((i for i in range(begin + 1, finish)
+                              if re.match(rf"\s*{re.escape(key)}\s*=", lines[i])), None)
+                if match is None:
+                    lines.insert(finish, f"{key} = {literal}")
+                else:
+                    lines[match] = f"{key} = {literal}"
+            source = "\n".join(lines) + "\n"
+    tomllib.loads(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                         delete=False) as stream:
+            temp = stream.name
+            stream.write(source)
+        os.replace(temp, target)
+    finally:
+        if temp and os.path.exists(temp):
+            os.unlink(temp)
+    return str(target)

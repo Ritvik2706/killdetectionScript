@@ -1,7 +1,7 @@
 """A full-screen, vim-navigable, fuzzy-filtered single-choice picker.
 
 Falls back to a plain numbered prompt when the terminal can't do raw input
-(piped output, no colour, dumb terminal).
+(piped input or output).
 """
 
 import sys
@@ -9,7 +9,7 @@ import sys
 from . import ansi
 from .ansi import LIME, TEAL, WHITE, GREY, DIM, AMBER, CYAN, paint, visible_len
 from .layout import term_width, term_height, panel, hint
-from . import keys
+from . import keys, screens
 
 _ALT_ENTER = "\033[?1049h\033[?25l"   # alternate screen + hide cursor
 _ALT_LEAVE = "\033[?25h\033[?1049l"   # show cursor + leave alternate screen
@@ -29,27 +29,21 @@ def select(items, render_row, *, title="SELECT", filter_text=None, initial=0):
     """
     if not items:
         return None
-    if not (ansi.COLOR and keys.supports_raw_input()):
+    if not keys.supports_raw_input():
         return _fallback(items, render_row, title)
 
     filter_text = filter_text or (lambda it: str(it))
     state = _State(items, filter_text, initial)
 
     fd = sys.stdin.fileno()
-    with keys.raw_mode(fd):
-        sys.stdout.write(_ALT_ENTER)
-        sys.stdout.flush()
-        try:
-            while True:
-                view = state.view()
-                state.clamp(view)
-                _draw(items, render_row, view, state, title)
-                result = state.handle(keys.read_key(fd), view)
-                if result is not _NOTHING:
-                    return result
-        finally:
-            sys.stdout.write(_ALT_LEAVE)
-            sys.stdout.flush()
+    with screens.session(), keys.raw_mode(fd):
+        while True:
+            view = state.view()
+            state.clamp(view)
+            _draw(items, render_row, view, state, title)
+            result = state.handle(keys.read_key(fd), view)
+            if result is not _NOTHING:
+                return result
 
 
 _NOTHING = object()   # sentinel: keep looping (no selection yet)
@@ -76,7 +70,7 @@ class _State:
 
     @property
     def rows_avail(self):
-        return max(1, term_height() - 6)
+        return max(1, term_height() - 9)
 
     def clamp(self, view):
         if self.cursor >= len(view):
@@ -114,7 +108,7 @@ class _State:
 
     def _handle_normal(self, key, view, was_g):
         avail = self.rows_avail
-        half, page = avail // 2, avail
+        half, page = max(1, avail // 2), avail
         last = len(view) - 1
 
         if key in ("j", "down"):
@@ -166,52 +160,27 @@ class _State:
 
 
 def _draw(items, render_row, view, state, title):
-    width = term_width()
-    out = ["\033[H"]
-
-    def line(s=""):
-        out.append(s + "\033[K\r\n")
-
     shown = len(view)
-    pos = f"{state.cursor + 1}/{shown}" if shown else "0/0"
-    head = "  " + paint("❯", LIME, bold=True) + " " + paint(title, WHITE, bold=True)
-    counter = paint(pos, GREY) + paint(f"  of {state.n}", DIM)
-    gap = max(1, width - visible_len(head) - visible_len(counter) - 2)
-    line()
-    line(head + " " * gap + counter)
-    line(paint("─" * (width - 2), DIM))
-
-    avail = state.rows_avail
-    if not view:
-        line("  " + paint(f"no matches for “{state.query}”", AMBER))
-        for _ in range(avail - 1):
-            line()
-    else:
-        end = min(state.scroll + avail, shown)
-        for pos_i in range(state.scroll, end):
-            line(render_row(items[view[pos_i]], pos_i == state.cursor, pos_i + 1))
-        for _ in range(avail - (end - state.scroll)):
-            line()
-
-    line(paint("─" * (width - 2), DIM))
+    position = f"{state.cursor + 1} / {shown}" if shown else "0 matches"
+    rows = [ansi.truncate(render_row(items[view[i]], i == state.cursor, i + 1), max(1, term_width() - 5))
+            for i in range(state.scroll, min(state.scroll + state.rows_avail, shown))]
+    if not rows:
+        rows = [paint(f"No matches for “{state.query}”", AMBER),
+                paint("Press Esc to clear your search.", GREY)]
     if state.mode == "search":
-        line("  " + paint("/", TEAL, bold=True) + paint(state.query, WHITE) + paint("▏", LIME))
+        footer = paint("/ " + state.query + "▏", TEAL) + paint("   Enter applies · Esc clears", DIM)
     else:
-        legend = hint([("j/k", "move"), ("gg/G", "ends"), ("^d/^u", "page"),
-                       ("/", "search"), ("⏎", "select"), ("q", "quit")])
-        status = ""
+        footer = hint([("↑/↓", "move"), ("Enter", "select"), ("/", "search"), ("Esc / q", "back")])
         if state.numbuf:
-            status = "  " + paint(f"go to {state.numbuf}", AMBER, bold=True)
+            footer += paint(f"  Go to {state.numbuf}", AMBER)
         elif state.query:
-            status = "  " + paint(f"filter “{state.query}”", TEAL)
-        line("  " + legend + status)
-    out.append("\033[J")
-    sys.stdout.write("".join(out))
-    sys.stdout.flush()
+            footer += paint(f"  Filter: {state.query}", TEAL)
+    heading = title.removeprefix("KILLCUTTER · ")
+    screens.draw(heading, f"{position}   ·   {len(items)} options", rows, footer)
 
 
 def _fallback(items, render_row, title):
-    """Plain numbered prompt for non-TTY / no-colour environments."""
+    """Plain numbered prompt for non-TTY environments."""
     print(panel([render_row(it, False, i) for i, it in enumerate(items, 1)],
                 title=title, color=CYAN))
     print()

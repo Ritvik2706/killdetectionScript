@@ -26,7 +26,10 @@ run the one command.
 ## Install
 
 ```bash
-pip install -e .
+python -m venv .venv
+source .venv/bin/activate       # Linux / macOS; run in each new shell
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -e .
 
 # plus the Tesseract binary (the one non-Python dependency):
 sudo apt install tesseract-ocr            # Linux
@@ -215,3 +218,97 @@ See `docs/ARCHITECTURE.md` for the module layout and data flow.
 - Trigger pixels and the default region assume 1920×1080 and the current HUD —
   run `diagnose` after a game update to check.
 - The terminal UI auto-disables colour when piped or when `NO_COLOR` is set.
+
+## Interactive workspace
+
+Run `killcutter` in a terminal (or `python -m killcutter ui`) to open the home
+screen. It includes **New scan**, **Settings**, **Environment**, **Help**, and
+**Export EDL**. Existing commands remain available for scripts; running without
+arguments through a pipe prints help.
+
+New scan lets you browse your recordings folder or enter a video path, then edit:
+
+- Analysis start and end in seconds, `MM:SS`, or `HH:MM:SS`, including fractions.
+- Lead-in, tail, sampling rate, live banner preview, and dry-run mode.
+- Timestamp filename, EDL filename, MP4 destination, and which exports to create.
+
+**Review scan summary** shows the selected portion on a timeline and lists output
+locations. Highlights are clamped to the selected range. Their timestamps remain
+relative to the original source, so EDLs relink correctly. Existing output files
+require a replacement choice in the interactive workflow. Files are written
+atomically; an interrupted scan saves partial timestamps and skips exports.
+
+Arrow keys or `j`/`k` navigate, Enter edits/selects, `/` searches, and `q` returns.
+In edit prompts, blank input keeps the current value, `/cancel` cancels, and
+`/clear` clears a text field. The full-screen keyboard interface also works with
+color disabled. Non-interactive terminals use numbered prompts.
+
+### Saved folders and settings
+
+The Settings screen edits a draft: **Save settings** persists it, **Discard**
+leaves the file unchanged, and **Reset editable settings to defaults** resets the
+draft. The destination config path is shown in the title. Existing config files
+are updated in place; with no active config, the user config directory is used.
+Use `killcutter --config ./project.toml settings` to choose another file.
+
+Recording input, timestamps, EDLs, and rendered MP4 clips have separate folders:
+
+```toml
+[detect]
+clips_dir = "/media/recordings"
+timestamps_dir = "/media/highlights/timestamps"
+clips_output_dir = "/media/highlights/clips"
+render_clips = false
+
+[export]
+output_dir = "/media/highlights/edl"
+name = "Kill Highlights"
+```
+
+Relative folders resolve from the working directory; `~` expands to your home.
+Output folders are created automatically. Empty timestamp/EDL folders mean the
+working directory. Interactive scans use `<recording>_timestamps.txt`; scripted
+`detect` keeps the legacy `timestamps.txt` default unless `--timestamps-dir` or
+`--output` is supplied. Explicit output filenames override folder settings.
+
+```bash
+# Guided setup for a specific recording
+killcutter detect --video gameplay.mkv --interactive
+
+# Analyze only minutes 12–18; choose independent output folders
+killcutter detect --video gameplay.mkv --start 12:00 --end 18:00 \
+  --timestamps-dir ./results/timestamps --edl-dir ./results/edl \
+  --render-clips --clips-output-dir ./results/clips
+
+# Exact output filenames
+killcutter detect --video gameplay.mkv --output ./results/cuts.txt \
+  --edl-output ./results/reel.edl
+
+# Standalone EDL export honors the saved EDL folder too
+killcutter export --video gameplay.mkv --timestamps ./results/cuts.txt \
+  --edl-dir ./results/edl
+```
+
+`--end` and `--limit` are mutually exclusive. `--limit` specifies a duration and
+also accepts timecodes. `--no-render-clips` overrides saved MP4 rendering settings.
+`--no-export` disables EDL creation; it does not disable requested MP4 rendering.
+`--dry-run` creates no output files or folders.
+
+### Optional rendered video clips
+
+Enable **Render MP4 clips** to create individual playable highlights in addition
+to timestamps and EDLs. This requires `ffmpeg` on PATH. Each highlight is encoded
+as H.264/AAC MP4 with accurate cuts and named
+`<recording>_highlight_001.mp4`, `...002.mp4`, etc. Audio is included when present.
+Rendering can take substantially longer than EDL export. Already completed MP4
+files survive an interruption; incomplete temporary output is removed. Older
+numbered clips from previous runs are not deleted automatically.
+
+The interactive workspace stays on a single full-screen terminal surface.
+Environment, Help, scan summaries, errors, and results use scrollable pages with
+fixed navigation hints. **Enter**, **Esc**, or **q** returns; arrow keys and
+Page Up/Down scroll. On Environment, **r** refreshes and **s** opens Settings.
+Value editing uses a dedicated form: arrows move the cursor, **Ctrl-U** clears
+the field, **Enter** applies the value, and **Esc** keeps the previous value.
+Quitting restores your original terminal screen. Scripted commands retain their
+normal console output.

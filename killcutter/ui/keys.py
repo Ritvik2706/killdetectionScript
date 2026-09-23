@@ -46,6 +46,8 @@ class raw_mode:
 
 def _read_unix(fd) -> str:
     ch = os.read(fd, 1)
+    if not ch:
+        return "ctrl-c"
     simple = {
         b"\x03": "ctrl-c", b"\x04": "ctrl-d", b"\x15": "ctrl-u",
         b"\x06": "ctrl-f", b"\x02": "ctrl-b", b"\r": "enter", b"\n": "enter",

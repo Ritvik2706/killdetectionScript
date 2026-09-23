@@ -8,7 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from killcutter import video
+from killcutter import video, outputs
 from killcutter.errors import VideoError
 from killcutter.models import Clip
 from killcutter.timecode import drift_seconds, resolve_fps, seconds_to_timecode
@@ -115,6 +115,5 @@ def build_edl(plan: ExportPlan) -> str:
 
 def write_edl(plan: ExportPlan) -> str:
     """Write the EDL to ``plan.out_path`` and return that path."""
-    with open(plan.out_path, "w") as f:
-        f.write(build_edl(plan))
+    outputs.atomic_text(plan.out_path, build_edl(plan))
     return plan.out_path

@@ -18,6 +18,8 @@ import sys
 from killcutter import (__version__, config, detection, environment, export,
                         reporting, video)
 from killcutter import ui
+from killcutter.ranges import parse_timestamp
+from killcutter import outputs
 from killcutter.constants import DEFAULT_CLIPS_DIR, DEFAULT_REGION
 from killcutter.detection import DetectionSettings
 from killcutter.errors import KillcutterError, NoClipsError
@@ -68,11 +70,22 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
                     help="Min seconds between detections (default: 3)")
     pd.add_argument("--rate", type=float, default=d.get("rate", 4),
                     help="Frame samples per second (default: 4)")
-    pd.add_argument("--start", type=float, default=0.0,
+    pd.add_argument("--start", type=parse_timestamp, default=0.0,
                     help="Skip to this many seconds in before scanning (default: 0)")
-    pd.add_argument("--limit", type=float,
+    window = pd.add_mutually_exclusive_group()
+    window.add_argument("--end", type=parse_timestamp, help="Stop at source time (seconds or HH:MM:SS)")
+    pd.add_argument("--interactive", action="store_true", help="Open guided scan setup")
+    window.add_argument("--limit", type=parse_timestamp,
                     help="Only scan this many seconds of footage (default: all)")
-    pd.add_argument("--output", default="timestamps.txt",
+    pd.add_argument("--timestamps-dir", default=d.get("timestamps_dir", ""),
+                    help="Folder for recording-specific timestamp files")
+    pd.add_argument("--edl-dir", default=e.get("output_dir", ""), help="Folder for EDL files")
+    pd.add_argument("--edl-output", help="Explicit EDL filename (overrides --edl-dir)")
+    pd.add_argument("--clips-output-dir", default=d.get("clips_output_dir", "highlights"),
+                    help="Folder for rendered MP4 highlights")
+    pd.add_argument("--render-clips", action=argparse.BooleanOptionalAction,
+                    default=d.get("render_clips", False), help="Render MP4 highlights with FFmpeg")
+    pd.add_argument("--output", default=None,
                     help="Where to write detected clips (default: timestamps.txt)")
     pd.add_argument("--preview", action="store_true",
                     help="Show the scan region live with OCR result (for tuning)")
@@ -81,6 +94,7 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
     pd.add_argument("--dry-run", action="store_true", dest="dry_run",
                     help="Print detected clips without writing timestamps.txt")
     pd.add_argument("--no-export", action="store_true", dest="no_export",
+                    default=not d.get("export", True),
                     help="Skip the automatic highlight-export step")
 
     # export ---------------------------------------------------------------
@@ -89,6 +103,7 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
     px.add_argument("--video", help="Source video (omit to pick from the clips folder)")
     px.add_argument("--timestamps", default="timestamps.txt",
                     help="timestamps.txt from detect (default: timestamps.txt)")
+    px.add_argument("--edl-dir", default=e.get("output_dir", ""), help="Folder for EDL files")
     px.add_argument("--output", help="Output EDL path (default: <video_stem>_highlights.edl)")
     px.add_argument("--name", default=e.get("name", "Kill Highlights"),
                     help="Sequence name shown in Premiere (default: 'Kill Highlights')")
@@ -108,6 +123,9 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
     pg.add_argument("--rate", type=float, default=d.get("rate", 4),
                     help="Frame samples per second (default: 4)")
 
+    sub.add_parser("ui", parents=[common], help="Open the interactive workspace")
+    sub.add_parser("settings", parents=[common], help="Edit and save default settings")
+
     # doctor ---------------------------------------------------------------
     sub.add_parser("doctor", parents=[common],
                    help="Check this machine has everything killcutter needs")
@@ -126,14 +144,34 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
 
 
 def _clips_dir(cfg) -> str:
-    return config.section(cfg, "detect").get("clips_dir") or DEFAULT_CLIPS_DIR
+    return os.path.expanduser(config.section(cfg, "detect").get("clips_dir") or DEFAULT_CLIPS_DIR)
 
 
 # ── Commands ────────────────────────────────────────────────────────────────────
 
 def cmd_detect(args, cfg, cfg_path) -> int:
+    if args.interactive:
+        from killcutter.ui.workspace import scan_setup
+        args.no_export = args.no_export or not config.section(cfg, "detect").get("export", True)
+        args = scan_setup(args, cfg)
+        if args is None:
+            return 0
     reporting.banner("kill scan", cfg_path)
     video_path = args.video or video.pick(_clips_dir(cfg))
+    args.output = args.output or (outputs.destination(video_path, args.timestamps_dir, "_timestamps.txt")
+                                  if args.timestamps_dir else "timestamps.txt")
+    args.edl_output = args.edl_output or outputs.destination(video_path, args.edl_dir, "_highlights.edl")
+    if not args.dry_run:
+        destinations = [args.output] + ([args.edl_output] if not args.no_export else [])
+        outputs.validate_paths([video_path], destinations)
+        args.output = outputs.prepare_file(args.output)
+        if not args.no_export:
+            args.edl_output = outputs.prepare_file(args.edl_output)
+        if args.render_clips:
+            import shutil
+            if not shutil.which("ffmpeg"):
+                from killcutter.errors import DependencyError
+                raise DependencyError("Rendering video clips requires FFmpeg on PATH.")
     override = tuple(args.region) if args.region else None
 
     settings = DetectionSettings(
@@ -146,38 +184,39 @@ def cmd_detect(args, cfg, cfg_path) -> int:
     clips, completed = detection.detect(video_path, settings, reporter,
                                         dry_run=args.dry_run,
                                         region_override=override,
-                                        start=args.start, limit=args.limit)
+                                        start=args.start, limit=args.limit, end=args.end)
 
     reporting.detection_results(clips)
     if not clips:
         return 0 if completed else 130
     if args.dry_run:
         reporting.dry_run_note()
-        return 0
+        return 0 if completed else 130
 
     _write_timestamps(args.output, clips)
     reporting.timestamps_saved(args.output)
     if not completed:
         reporting.partial_note(args.output)
 
-    auto_export = (config.section(cfg, "detect").get("export", True)
-                   and not args.no_export and completed)
+    auto_export = not args.no_export and completed
     if auto_export:
         reporting.export_handoff()
-        _do_export(video_path, args.output)
+        e = config.section(cfg, "export")
+        _do_export(video_path, args.output, name=e.get("name", "Kill Highlights"), fps=e.get("fps"), output=args.edl_output)
     elif not completed:
         reporting.export_skipped(args.output)
         return 130
+    if args.render_clips and completed:
+        outputs.render_clips(video_path, clips, args.clips_output_dir,
+                             progress=lambda i, n, p: print(ui.paint(f"  Rendered {i}/{n} · {p}", ui.GREEN)))
     return 0
 
 
 def _write_timestamps(path, clips) -> None:
     """Write clips atomically, so an interrupted write cannot truncate the file."""
-    tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
-        for clip in clips:
-            f.write(f"{clip.start:.3f} {clip.end:.3f} {clip.name}\n")
-    os.replace(tmp, path)
+    outputs.atomic_text(path, "".join(
+        f"{clip.start:.3f} {clip.end:.3f} {clip.name}\n" for clip in clips))
+
 
 
 def cmd_doctor(args, cfg, cfg_path) -> int:
@@ -191,7 +230,8 @@ def cmd_export(args, cfg, cfg_path) -> int:
     reporting.banner("highlight export", cfg_path)
     video_path = args.video or video.pick(_clips_dir(cfg))
     _do_export(video_path, args.timestamps,
-               name=args.name, fps=args.fps, output=args.output)
+               name=args.name, fps=args.fps, output=args.output or
+               outputs.destination(video_path, args.edl_dir, "_highlights.edl"))
     return 0
 
 
@@ -200,6 +240,8 @@ def _do_export(video_path, timestamps_path, *, name="Kill Highlights", fps=None,
     if not clips:
         raise NoClipsError(f"No clips found in {timestamps_path}")
     plan = export.plan(video_path, clips, fps_override=fps, name=name, output=output)
+    outputs.validate_paths([video_path, timestamps_path], [plan.out_path])
+    plan.out_path = outputs.prepare_file(plan.out_path)
     reporting.export_plan(plan)
     export.write_edl(plan)
     reporting.export_saved(plan)
@@ -266,12 +308,23 @@ def main(argv=None) -> int:
     parser = _build_parser(cfg, common)
     args = parser.parse_args(argv)
     if not args.command:
-        parser.print_help()
-        return 0
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            args.command = "ui"
+        else:
+            parser.print_help()
+            return 0
 
     try:
+        if args.command == "settings":
+            from killcutter.ui.workspace import settings
+            settings(cfg, cfg_path or known.config)
+            return 0
+        if args.command == "ui":
+            from killcutter.ui.workspace import home
+            return home(cfg, cfg_path or known.config,
+                        lambda current: _build_parser(current, common), _COMMANDS, no_color=known.no_color)
         return _COMMANDS[args.command](args, cfg, cfg_path)
-    except KillcutterError as exc:
+    except (KillcutterError, OSError) as exc:
         reporting.error(str(exc))
         return 1
     except KeyboardInterrupt:

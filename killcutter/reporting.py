@@ -46,6 +46,8 @@ class ConsoleReporter:
                                  + (f"   ·   {meta.layout}" if meta.layout else "")),
             ui.kv("Clip window", f"−{s.offset:g}s lead-in   +{s.end_offset:g}s tail"
                                  f"   ·   merge < {s.merge_gap:g}s"),
+            ui.kv("Analyze range", f"{format_clock(meta.scan_start)} → "
+                                      f"{format_clock(meta.scan_end or meta.duration)}"),
             ui.kv("Sampling", f"{s.rate:g}×/sec   ·   {meta.total_checks} checks"),
         ]
         if meta.dry_run:

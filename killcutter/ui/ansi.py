@@ -93,3 +93,23 @@ def badge(text, fg=INK, bg=GREEN, *, bold=True):
         f"\033[{b}38;2;{fg[0]};{fg[1]};{fg[2]};48;2;{bg[0]};{bg[1]};{bg[2]}m"
         f" {text} \033[0m"
     )
+
+
+def truncate(text, width):
+    """Clip styled terminal text without splitting escape sequences."""
+    width = max(0, width)
+    if visible_len(text) <= width:
+        return text
+    if width == 0:
+        return ""
+    result, visible, pos = [], 0, 0
+    while pos < len(text) and visible < width - 1:
+        match = _ANSI_RE.match(text, pos)
+        if match:
+            result.append(match.group())
+            pos = match.end()
+        else:
+            result.append(text[pos])
+            visible += 1
+            pos += 1
+    return ''.join(result) + '…' + ('\033[0m' if COLOR else '')

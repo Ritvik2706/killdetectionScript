@@ -3,7 +3,7 @@
 import shutil
 import time
 
-from .ansi import DIM, GREEN, CYAN, LIME, TEAL, WHITE, GREY, paint, lerp, visible_len
+from .ansi import DIM, GREEN, CYAN, LIME, TEAL, WHITE, GREY, paint, lerp, visible_len, truncate
 
 
 def term_width(default=90) -> int:
@@ -30,7 +30,7 @@ def rel_time(ts: float) -> str:
 
 
 def _box_width() -> int:
-    return min(term_width() - 2, 84)
+    return max(12, min(term_width() - 2, 84))
 
 
 def rule(color=DIM, char="─", width=None) -> str:
@@ -74,6 +74,7 @@ def panel(rows, title="", color=TEAL) -> str:
     bar = paint("│", DIM)
     out = [top]
     for row in rows:
+        row = truncate(row, inner - 2)
         pad = inner - 1 - visible_len(row)
         out.append(f"{bar} {row}{' ' * max(pad, 0)}{bar}")
     out.append(paint("╰" + "─" * inner + "╯", DIM))
