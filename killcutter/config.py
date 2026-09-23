@@ -28,17 +28,27 @@ DEFAULT_TOML = """\
 # Anything here becomes the default; command-line flags still win.
 
 [detect]
-# clips_dir   = "/mnt/r/Videos/Clips/Warzone"
+# Where your recordings live. Without this, killcutter looks in the usual
+# places (~/Videos/Clips/Warzone, ~/Videos, ~/Movies, %USERPROFILE%\\Videos).
+# clips_dir   = "D:/Videos/Clips/Warzone"
+
 offset      = 5          # seconds before the kill for the clip start
 end_offset  = 5          # seconds after the kill for the clip end
 merge_gap   = 10         # merge kills closer than this into one clip
 cooldown    = 3          # min seconds between detections
-rate        = 2          # frame samples per second
-# region    = [1598, 186, 189, 45]   # x, y, w, h  (1920x1080 banner)
+rate        = 4          # frame samples per second; higher = tighter cut timing
+                         # and costs little, since every frame is decoded anyway
 export      = true       # auto-run the highlight exporter when detection ends
 
+# The banner region is scaled automatically from the 1920x1080 reference, so
+# 1440p/4K/ultrawide work without changing anything. Set this only if you have
+# measured your own with 'killcutter calibrate'.
+# region    = [1598, 186, 189, 45]   # x, y, w, h
+
 [export]
-# fps  = 59.94           # force authoring fps (must match your sequence)
+# Leave fps unset: the real rate is read from the file. Only force it if your
+# Premiere sequence must stay at a rate the footage is not (see the README).
+# fps  = 59.94
 name = "Kill Highlights" # sequence name shown in Premiere
 
 [ui]

@@ -26,32 +26,51 @@ def format_eta(secs) -> str:
     return f"{m:02}:{s:02}"
 
 
-def ntsc_rate(fps: float) -> float:
-    """Map an OBS/camera-reported rate to the real NTSC rate Premiere conforms to.
+NTSC_BASES = (24, 30, 60, 120)
 
-    OpenCV reports ~60 fps footage as exactly 60.0, but Premiere imports the EDL
-    into a 59.94 fps (60000/1001) sequence. Authoring at 60 while Premiere plays
-    at 59.94 drifts every clip later by ~0.09% of its timecode — seconds deep
-    into a long recording. Authoring at the same 59.94 makes the drift zero.
+
+def resolve_fps(fps: float) -> float:
+    """Snap a probed frame rate to the exact rate the media actually runs at.
+
+    A recording is either a true integer rate (OBS writing 60/1) or an NTSC rate
+    (60000/1001 = 59.94). Both reach us as floats carrying a little noise, so
+    each is snapped to its exact value — and crucially, **never converted into
+    the other**.
+
+    This used to rewrite every ~60 fps rate as 59.94 unconditionally, on the
+    assumption that Premiere always conforms to NTSC. For genuinely 60.000 fps
+    footage that makes each timecode 0.1% short, which is invisible at the start
+    of a recording and ruinous at the end: a cut lands 3.6s early at one hour,
+    5.4s early at 90 minutes and 7.2s early at two hours — enough for a 10s
+    highlight to finish before the kill it was built around. Author at the rate
+    the media really is, and have the sequence match it.
     """
-    for base in (24, 30, 60, 120):
-        if abs(fps - base) < 0.05:
-            return base * 1000.0 / 1001.0
+    for base in NTSC_BASES:
+        if abs(fps - base) < 0.01:
+            return float(base)                  # a true integer rate
+        ntsc = base * 1000.0 / 1001.0
+        if abs(fps - ntsc) < 0.05:
+            return ntsc                         # genuinely NTSC, snap off noise
     return fps
 
 
-def is_drop_frame(fps: float) -> bool:
-    """29.97 and 59.94 use drop-frame timecode; everything else is non-drop."""
-    return abs(fps - round(fps)) > 0.005 and round(fps) in (30, 60)
+def drift_seconds(authored_fps: float, media_fps: float, at_seconds: float) -> float:
+    """How far a cut authored at ``authored_fps`` lands from where it belongs.
+
+    Negative means early. This is the arithmetic behind the bug above, kept as a
+    function so the export step can warn instead of silently drifting.
+    """
+    if media_fps <= 0:
+        return 0.0
+    return at_seconds * (authored_fps / media_fps) - at_seconds
 
 
 def seconds_to_timecode(secs: float, fps: float) -> str:
     """Seconds → ``HH:MM:SS:FF`` non-drop timecode.
 
-    ``fps`` is the real playback rate (e.g. 59.94): the frame index is computed
-    at that rate so the clip lands at the right wall-clock time, while labels
-    roll over at the nominal integer rate (60) — how Premiere reads non-drop
-    timecode for a 59.94 sequence.
+    ``fps`` is the media's real rate. The frame index is computed at that rate so
+    the clip lands at the right wall-clock time, while labels roll over at the
+    nominal integer rate — which is exactly how a non-drop timecode is read.
     """
     nominal = max(1, round(fps))
     total_frames = int(round(secs * fps))

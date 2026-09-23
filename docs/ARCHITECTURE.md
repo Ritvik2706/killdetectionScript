@@ -22,6 +22,13 @@ and lets the pure logic be unit-tested without a clip or a terminal.
         │  probe · discover  │          │  region / pixel    │
         │  · pick (uses ui)  │          │  (OpenCV windows)  │
         └────────────────────┘          └────────────────────┘
+                            ┌──────────────────────────────┐
+ Health                     │ diagnose.py    environment.py│
+                            │  footage →      deps →       │
+                            │  Diagnosis      doctor report│
+                            └──────────────────────────────┘
+
+ Portability    hud.py — banner geometry for any resolution, anchored top-right
 
  Presentation   reporting.py  ──uses──▶  ui/  (ansi · layout · progress · selector · keys)
  Shared         models.Clip · timecode · constants · errors · config
@@ -39,10 +46,26 @@ and lets the pure logic be unit-tested without a clip or a terminal.
    and — unless `--no-export` / `[detect] export=false` — calls `_do_export`
    **in process** (no subprocess).
 
+### `diagnose`
+1. `cli.cmd_diagnose` resolves the video and calls `diagnose.diagnose(...)`.
+2. It samples a window with detection's own `_samples`, `_pixel_is_*` and
+   `_is_kill_header`, so it measures the real pipeline rather than a copy of it,
+   and tallies how many frames survive each stage.
+3. `Diagnosis.problems` turns those tallies into an ordered list of likely
+   causes; `reporting.diagnosis` draws them. A non-empty list exits non-zero.
+
+### `doctor`
+`environment.check()` probes Python, OpenCV, NumPy, pytesseract, the Tesseract
+binary, the config and the clips folder, returning `Check` records that
+`reporting.doctor` renders. Non-required failures (a missing clips folder) are
+reported without blocking, since `--video` bypasses the picker entirely.
+
 ### `export`
 1. `export.read_timestamps` → `list[Clip]`.
-2. `export.plan(video, clips, …)` resolves the authoring fps (NTSC-corrected),
-   drop-frame mode and output path into an immutable `ExportPlan`.
+2. `export.plan(video, clips, …)` resolves the authoring fps (snapped to the
+   media's real rate, never converted between 60 and 59.94), cross-checks it
+   against `frames / duration`, and settles the output path into an immutable
+   `ExportPlan`.
 3. `export.build_edl(plan)` renders the EDL string; `write_edl` saves it.
 4. `reporting.export_plan` / `export_saved` draw the panels.
 
@@ -72,7 +95,11 @@ everywhere at once.
 ## Testing
 
 `tests/` covers the pure layers without a video file:
-- `test_timecode` — formatting, NTSC correction, timecode rollover
+- `test_timecode` — formatting, frame-rate resolution, drift over hours
+- `test_hud` — 1080p is byte-identical to the constants; scaling and ultrawide
+- `test_validation` — impossible settings fail before the scan, not during
+- `test_environment` — Tesseract discovery and what counts as blocking
+- `test_reporting` — the progress line always fits the terminal
 - `test_export` — `read_timestamps`, EDL header/events, contiguous records
 - `test_config` — write/load roundtrip, no-clobber, missing file
 - `test_selector` — fuzzy matching and the picker `_State` transitions

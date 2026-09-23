@@ -5,6 +5,8 @@ hooks; the rest are one-shot renderers the CLI calls directly. Keeping every
 ``print`` here means the core modules stay free of formatting concerns.
 """
 
+import sys
+
 from killcutter import ui
 from killcutter.timecode import format_clock, format_duration, format_eta
 
@@ -29,6 +31,9 @@ class ConsoleReporter:
 
     def __init__(self, debug: bool = False):
         self.debug = debug
+        # The live bar redraws with \r, which turns into thousands of lines when
+        # stdout is a pipe or a log file. Only animate it for a real terminal.
+        self.animate = sys.stdout.isatty()
 
     def begin(self, meta) -> None:
         s = meta.settings
@@ -37,7 +42,8 @@ class ConsoleReporter:
             ui.kv("Format", f"{meta.fps:.2f} fps   ·   {format_clock(meta.duration)}"
                             f"   ·   {meta.total_frames} frames"),
             ui.kv("Scan region", f"x={meta.region[0]}  y={meta.region[1]}  "
-                                 f"w={meta.region[2]}  h={meta.region[3]}"),
+                                 f"w={meta.region[2]}  h={meta.region[3]}"
+                                 + (f"   ·   {meta.layout}" if meta.layout else "")),
             ui.kv("Clip window", f"−{s.offset:g}s lead-in   +{s.end_offset:g}s tail"
                                  f"   ·   merge < {s.merge_gap:g}s"),
             ui.kv("Sampling", f"{s.rate:g}×/sec   ·   {meta.total_checks} checks"),
@@ -54,10 +60,20 @@ class ConsoleReporter:
             print(f"  {ui.paint(format_clock(elapsed), ui.GREY)}  triggered={mark}")
 
     def progress(self, done, total, elapsed, duration, kills, eta) -> None:
-        if self.debug:
+        if self.debug or not self.animate:
             return
-        print(self._bar(done, total, elapsed, duration, kills, done, eta),
+        # CLEAR_LINE first, so a line that got shorter (terminal resized, a
+        # suffix dropped) leaves no tail of the previous frame behind.
+        print(ui.CLEAR_LINE + self._bar(done, total, elapsed, duration, kills, done, eta),
               end="\r", flush=True)
+
+    def aborted(self, elapsed, duration, kills) -> None:
+        pct = 100 * elapsed / duration if duration else 0
+        print(ui.CLEAR_LINE + "  " + ui.badge("STOPPED", fg=ui.INK, bg=ui.AMBER) + " "
+              + ui.paint(f"Scan interrupted at {format_clock(elapsed)} "
+                         f"({pct:.0f}% of the file).", ui.WHITE))
+        print("  " + ui.paint(f"Keeping the {kills} clip{'s' if kills != 1 else ''} "
+                              "found so far.", ui.DIM))
 
     def kill(self, index, at, clip) -> None:
         print(
@@ -77,19 +93,45 @@ class ConsoleReporter:
             + ui.paint(f"   {clip.name}", ui.GREY)
         )
 
-    @staticmethod
-    def _bar(done, total, elapsed, duration, kills, tick, eta, width=32):
+    # The bar is redrawn with \r, which only returns to the start of the final
+    # screen row. A line wider than the terminal therefore wraps and leaves its
+    # previous rows behind, turning the live bar into a wall of scrolling text —
+    # so the line is fitted to the terminal instead of being a fixed width.
+    MAX_BAR = 32
+    MIN_BAR = 6
+
+    @classmethod
+    def _bar(cls, done, total, elapsed, duration, kills, tick, eta, width=None):
         pct = done / max(total, 1)
         spin = ui.spinner_frame(tick)
-        bar = ui.gradient_bar(pct, width)
         pct_s = ui.paint(f"{pct * 100:5.1f}%", ui.WHITE, bold=True)
-        clock = ui.paint(f"{format_clock(elapsed)} / {format_clock(duration)}", ui.GREY)
-        eta_s = ui.paint(f"ETA {format_eta(eta)}", ui.DIM)
         if kills:
-            tally = "  " + ui.badge(f"{kills} KILL{'S' if kills != 1 else ''}", bg=ui.GREEN)
+            tally = ui.badge(f"{kills} KILL{'S' if kills != 1 else ''}", bg=ui.GREEN)
         else:
-            tally = "  " + ui.paint("0 kills", ui.DIM)
-        return f"  {spin} {bar} {pct_s}  {clock}  {eta_s}{tally}"
+            tally = ui.paint("0 kills", ui.DIM)
+
+        # (drop_rank, text) — lowest rank is given up first when space is tight.
+        # The ETA goes before the clock, and the kill tally is kept longest.
+        suffixes = [
+            (1, "  " + ui.paint(f"{format_clock(elapsed)} / {format_clock(duration)}",
+                                ui.GREY)),
+            (0, "  " + ui.paint(f"ETA {format_eta(eta)}", ui.DIM)),
+            (2, "  " + tally),
+        ]
+
+        avail = (ui.term_width() if width is None else width) - 1
+        fixed = 2 + ui.visible_len(spin) + 1 + 1 + ui.visible_len(pct_s)
+
+        def suffix_width():
+            return sum(ui.visible_len(t) for _, t in suffixes)
+
+        while suffixes and fixed + suffix_width() + cls.MIN_BAR > avail:
+            suffixes.remove(min(suffixes, key=lambda s: s[0]))
+
+        bar_w = max(cls.MIN_BAR,
+                    min(cls.MAX_BAR, avail - fixed - suffix_width()))
+        bar = ui.gradient_bar(pct, bar_w)
+        return f"  {spin} {bar} {pct_s}" + "".join(t for _, t in suffixes)
 
 
 # ── One-shot result / export renderers ──────────────────────────────────────────
@@ -99,8 +141,9 @@ def detection_results(clips) -> None:
     print(ui.CLEAR_LINE + ui.rule(ui.DIM))
     if not clips:
         print("  " + ui.badge("DONE", bg=ui.AMBER) + " "
-              + ui.paint("No kills detected.", ui.WHITE)
-              + ui.paint("  Try tuning the region / trigger pixels with calibrate.", ui.DIM))
+              + ui.paint("No kills detected.", ui.WHITE))
+        print("  " + ui.paint("Run 'killcutter diagnose' to see which check is failing.",
+                              ui.DIM))
         return
 
     rows = []
@@ -139,12 +182,15 @@ def export_plan(plan) -> None:
         ui.kv("Frame rate", f"{plan.fps:.3f} fps   ·   "
                             f"{'drop' if plan.is_drop else 'non-drop'} frame"),
     ]
-    if plan.ntsc_note:
-        info.append(ui.kv("NTSC", plan.ntsc_note, val_color=ui.AMBER))
+    if plan.fps_note:
+        info.append(ui.kv("Rate", plan.fps_note, val_color=ui.AMBER))
     info.append(ui.kv("Reel", f"{n} clip{'s' if n != 1 else ''}   ·   "
                               f"{format_duration(plan.total_seconds)} total"))
     info.append(ui.kv("Output", plan.out_path, val_color=ui.WHITE))
     print(ui.panel(info, title="EXPORT", color=ui.PURPLE))
+    if plan.fps_warning:
+        print("  " + ui.badge("CHECK FPS", fg=ui.INK, bg=ui.AMBER) + " "
+              + ui.paint(plan.fps_warning, ui.WHITE))
     print()
 
     rows = []
@@ -170,3 +216,129 @@ def export_saved(plan) -> None:
 
 def interrupted() -> None:
     print(ui.paint("\n  Interrupted.", ui.DIM))
+
+
+# ── Diagnosis renderer ──────────────────────────────────────────────────────────
+
+def _swatch(rgb) -> str:
+    """Name a colour roughly, so 'red → yellow' jumps out of the report."""
+    r, g, b = rgb
+    if r < 60 and g < 60 and b < 60:
+        return "dark"
+    if g > 180 and r > 180:
+        return "yellow"
+    if r > 150 and g < 80:
+        return "red"
+    if r > 150 and g < 150:
+        return "orange"
+    return "other"
+
+
+def diagnosis(report) -> None:
+    """Print the DIAGNOSIS panels for a :class:`killcutter.diagnose.Diagnosis`."""
+    from killcutter import constants
+
+    size = f"{report.width}x{report.height}"
+    size_ok = (report.width, report.height) == (1920, 1080)
+    scanned = f"{format_clock(report.scan_start)} → " \
+              f"{format_clock(report.scan_start + report.scan_span)}"
+    info = [
+        ui.kv("Source", report.source, val_color=ui.WHITE),
+        ui.kv("Format", f"{size}   ·   {report.fps:.2f} fps   ·   "
+                        f"{format_clock(report.duration)}",
+              val_color=ui.WHITE if size_ok else ui.AMBER),
+        ui.kv("Scanned", f"{scanned}   ·   {report.sampled} samples"),
+        ui.kv("Scan region", f"x={report.region[0]}  y={report.region[1]}  "
+                             f"w={report.region[2]}  h={report.region[3]}"),
+        ui.kv("HUD layout", report.layout or "1920x1080 reference layout"),
+    ]
+    print(ui.panel(info, title="DIAGNOSIS", color=ui.TEAL))
+    print()
+
+    def stage(label, hits, coord=None):
+        pct = 100 * hits / max(report.sampled, 1)
+        colour = ui.GREEN if hits else ui.RED
+        where = ui.paint(f"  {coord}", ui.DIM) if coord else ""
+        return (ui.paint(f"{label:<22}", ui.GREY)
+                + ui.paint(f"{hits:5d} frames", colour, bold=True)
+                + ui.paint(f"  ({pct:4.1f}%)", ui.DIM) + where)
+
+    rows = [
+        stage("white pixel", report.white_hits, report.white_pixel),
+        stage("accent pixel", report.accent_hits, report.accent_pixel),
+        stage("both (OCR runs)", report.gated),
+        stage("header confirmed", report.kills),
+    ]
+    if report.accent_samples:
+        med = tuple(int(sum(c[i] for c in report.accent_samples)
+                        / len(report.accent_samples)) for i in range(3))
+        rows += ["", ui.paint("accent colour seen      ", ui.GREY)
+                 + ui.paint(f"RGB{med}", ui.WHITE)
+                 + ui.paint(f"  ({_swatch(med)})", ui.AMBER)]
+    print(ui.panel(rows, title="PIPELINE", color=ui.CYAN))
+
+    if report.headers:
+        print()
+        hrows = []
+        for h in report.headers[:12]:
+            mark = (ui.paint("✓", ui.GREEN, bold=True) if h.accepted
+                    else ui.paint("·", ui.DIM))
+            hrows.append(
+                f"{mark} " + ui.paint(f"{h.count:4d}x", ui.AMBER) + "  "
+                + ui.paint(f"{h.header[:28]:28s}",
+                           ui.WHITE if h.accepted else ui.GREY)
+                + ui.paint(f"  RGB{h.accent} {_swatch(h.accent)}", ui.DIM))
+        print(ui.panel(hrows, title="BANNERS SEEN", color=ui.PURPLE))
+
+    print()
+    problems = report.problems
+    if not problems:
+        print("  " + ui.badge("HEALTHY", bg=ui.GREEN) + " "
+              + ui.paint(f"Detected {report.kills} confirmed kill frames — "
+                         "the HUD constants still match this footage.", ui.WHITE))
+    else:
+        for p in problems:
+            print("  " + ui.badge("PROBLEM", bg=ui.RED) + " " + ui.paint(p, ui.WHITE))
+
+
+# ── Doctor renderer ─────────────────────────────────────────────────────────────
+
+def doctor(results) -> None:
+    """Print the environment check table from :func:`killcutter.environment.check`."""
+    rows = []
+    for c in results:
+        if c.ok:
+            mark = ui.paint("✓", ui.GREEN, bold=True)
+            label = ui.paint(f"{c.name:<16}", ui.WHITE)
+        else:
+            mark = ui.paint("✗", ui.RED, bold=True)
+            label = ui.paint(f"{c.name:<16}", ui.RED, bold=True)
+        rows.append(f"{mark} {label}{ui.paint(c.detail, ui.GREY)}")
+        if c.fix and not c.ok:
+            rows.append(f"  {ui.paint('↳ ' + c.fix, ui.AMBER)}")
+        elif c.fix:
+            rows.append(f"  {ui.paint('↳ ' + c.fix, ui.DIM)}")
+    print(ui.panel(rows, title="ENVIRONMENT", color=ui.TEAL))
+    print()
+
+    from killcutter.environment import blocking_failures
+    bad = blocking_failures(results)
+    if not bad:
+        print("  " + ui.badge("READY", bg=ui.GREEN) + " "
+              + ui.paint("Everything killcutter needs is installed.", ui.WHITE))
+    else:
+        names = ", ".join(c.name for c in bad)
+        print("  " + ui.badge("BLOCKED", bg=ui.RED) + " "
+              + ui.paint(f"Cannot run until this is fixed: {names}", ui.WHITE))
+
+
+def export_skipped(timestamps_path) -> None:
+    """After an interrupted scan, don't silently build a reel from half a file."""
+    print("\n  " + ui.paint("Export skipped because the scan was stopped. "
+                            "Build the EDL anyway with:", ui.DIM))
+    print("  " + ui.paint(f"killcutter export --timestamps {timestamps_path}", ui.WHITE))
+
+
+def partial_note(path) -> None:
+    print("  " + ui.paint("Scan was interrupted, so this file covers only the part "
+                          "that was scanned.", ui.DIM))

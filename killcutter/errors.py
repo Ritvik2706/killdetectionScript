@@ -11,3 +11,11 @@ class VideoError(KillcutterError):
 
 class NoClipsError(KillcutterError):
     """No kill clips were available to export."""
+
+
+class ConfigError(KillcutterError):
+    """A setting was given a value that cannot work."""
+
+
+class DependencyError(KillcutterError):
+    """A required external tool (Tesseract) is missing or unusable."""

@@ -33,6 +33,47 @@ def probe(path) -> tuple:
     return fps, frames
 
 
+def measure(path) -> tuple:
+    """Return ``(fps, total_frames, duration_seconds)``.
+
+    Duration comes from the container's own timestamps rather than
+    ``frames / fps``, so the two can be compared against each other — that
+    cross-check is what catches a frame rate the file is lying about.
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise VideoError(f"Could not open: {path}")
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0)
+    end_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+    cap.release()
+    if end_ms > 0:
+        duration = end_ms / 1000.0
+    else:
+        duration = frames / fps if fps > 0 else 0.0
+    return fps, frames, duration
+
+
+def frame_size(path) -> tuple:
+    """Return ``(width, height)`` for a video, or the 1080p reference if unknown."""
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise VideoError(f"Could not open: {path}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    return (w, h) if w > 0 and h > 0 else (1920, 1080)
+
+
+def measured_fps(frames: int, duration: float):
+    """Frame rate implied by the container, or ``None`` if it cannot be known."""
+    if frames <= 1 or duration <= 0:
+        return None
+    # The last frame's timestamp marks its start, so the span covers frames-1.
+    return (frames - 1) / duration
+
+
 def _duration_label(path) -> str:
     fps, frames = probe(path)
     return format_duration(frames / fps) if fps > 0 and frames > 0 else "?"

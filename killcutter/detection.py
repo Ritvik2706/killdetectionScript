@@ -2,8 +2,10 @@
 
 CoD shows an "ENEMY DOWNED" banner in the top-right on a kill. OCR on every
 frame would be far too slow, so each sampled frame is gated by two cheap pixel
-checks (a white pixel on the banner text, a red pixel on its accent); only
-matching frames are OCR'd to read the player name.
+checks (see :mod:`killcutter.constants`); only frames that pass are OCR'd, and
+the OCR'd header then has to actually read "ENEMY DOWNED" before we count a
+kill. That last step matters: teammate banners share the slot, the icon and the
+accent colour, so pixels alone cannot tell them apart.
 
 This module is presentation-free: it walks the video and reports progress and
 events through a ``reporter`` object (see :mod:`killcutter.reporting`),
@@ -11,15 +13,17 @@ returning the list of :class:`~killcutter.models.Clip` it found. Anything that
 prints lives in the reporter, so the algorithm stays testable and readable.
 """
 
+import difflib
 import os
+import re
 import time
 from dataclasses import dataclass
 
 import cv2
 import pytesseract
 
-from killcutter import constants
-from killcutter.errors import VideoError
+from killcutter import constants, hud as hud_mod
+from killcutter.errors import ConfigError, DependencyError, VideoError
 from killcutter.models import Clip
 
 
@@ -35,6 +39,26 @@ class DetectionSettings:
     debug: bool = False
 
 
+def validate(settings: DetectionSettings) -> None:
+    """Reject settings that would silently produce nonsense."""
+    if settings.rate <= 0:
+        raise ConfigError(f"--rate must be greater than 0 (got {settings.rate:g}).")
+    if settings.rate > 60:
+        raise ConfigError(f"--rate above 60 samples/sec is pointless (got "
+                          f"{settings.rate:g}); footage is 60fps at most.")
+    for name, value in (("--offset", settings.offset),
+                        ("--end-offset", settings.end_offset),
+                        ("--merge-gap", settings.merge_gap),
+                        ("--cooldown", settings.cooldown)):
+        if value < 0:
+            raise ConfigError(f"{name} cannot be negative (got {value:g}).")
+    if len(settings.region) != 4 or any(v < 0 for v in settings.region):
+        raise ConfigError(f"--region must be four non-negative numbers "
+                          f"(got {tuple(settings.region)}).")
+    if settings.region[2] <= 0 or settings.region[3] <= 0:
+        raise ConfigError("--region width and height must be greater than 0.")
+
+
 @dataclass
 class DetectionMeta:
     source: str
@@ -45,45 +69,132 @@ class DetectionMeta:
     settings: DetectionSettings
     total_checks: int
     dry_run: bool
+    layout: str = ""
 
 
 # ── Pixel pre-checks ────────────────────────────────────────────────────────────
 
+def _pixel(frame, coord):
+    """Return ``(r, g, b)`` at ``coord``, or ``None`` if it is off-frame."""
+    px, py = coord
+    fh, fw = frame.shape[:2]
+    if py >= fh or px >= fw:
+        return None
+    b, g, r = frame[py, px]
+    return int(r), int(g), int(b)
+
+
 def _pixel_is_white(frame, coord) -> bool:
-    px, py = coord
-    fh, fw = frame.shape[:2]
-    if py >= fh or px >= fw:
+    """True where the banner icon is: bright on every channel."""
+    rgb = _pixel(frame, coord)
+    if rgb is None:
         return False
-    b, g, r = frame[py, px]
     t = constants.BRIGHT_THRESHOLD
-    return int(b) > t and int(g) > t and int(r) > t
+    return rgb[0] > t and rgb[1] > t and rgb[2] > t
 
 
-def _pixel_is_red(frame, coord) -> bool:
-    px, py = coord
-    fh, fw = frame.shape[:2]
-    if py >= fh or px >= fw:
+def _pixel_is_accent(frame, coord) -> bool:
+    """True on the banner's left accent bar — a saturated warm colour.
+
+    Hue-agnostic on purpose: the bar was red before the Sept 2026 HUD restyle
+    and is yellow after it, and both should keep working.
+    """
+    rgb = _pixel(frame, coord)
+    if rgb is None:
         return False
-    b, g, r = frame[py, px]
-    t = constants.RED_THRESHOLD
-    return int(r) > t and int(g) < t and int(b) < t
+    return rgb[0] > constants.ACCENT_MIN_RED and rgb[2] < constants.ACCENT_MAX_BLUE
 
 
-def _banner_visible(frame) -> bool:
-    return (_pixel_is_white(frame, constants.TRIGGER_PIXEL_WHITE)
-            and _pixel_is_red(frame, constants.TRIGGER_PIXEL_RED))
+def _banner_visible(frame, hud=None) -> bool:
+    """Cheap gate: is *a* kill-shaped banner on screen? Confirmed later by OCR.
+
+    ``hud`` carries the resolved pixel coordinates for this frame size; without
+    one the 1920x1080 reference values are used.
+    """
+    white = hud.white if hud else constants.TRIGGER_PIXEL_WHITE
+    accent = hud.accent if hud else constants.TRIGGER_PIXEL_ACCENT
+    return _pixel_is_white(frame, white) and _pixel_is_accent(frame, accent)
 
 
 # ── OCR + name merging ──────────────────────────────────────────────────────────
 
-def _read_player_name(roi) -> str:
-    """Return the player name from the banner ROI via OCR (or "" if unsure)."""
+def _ocr_lines(roi) -> list:
+    """OCR the banner ROI and return its non-empty lines, in order."""
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     _, thresh = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    text = pytesseract.image_to_string(thresh, config=constants.TESSERACT_CONFIG).strip()
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return lines[-1] if len(lines) >= 2 else ""
+    try:
+        text = pytesseract.image_to_string(thresh, config=constants.TESSERACT_CONFIG)
+    except (pytesseract.TesseractNotFoundError, OSError) as exc:
+        from killcutter import environment
+        raise DependencyError(
+            "Tesseract OCR is required to read player names but could not be "
+            f"run ({exc}).\n  Install it with:  {environment.install_hint()}\n"
+            "  Or set KILLCUTTER_TESSERACT to the binary's full path."
+        ) from exc
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+def _letters(text: str) -> str:
+    return re.sub(r"[^A-Z]", "", text.upper())
+
+
+def _is_kill_header(header: str) -> bool:
+    """True if ``header`` reads "ENEMY DOWNED" rather than a teammate banner.
+
+    OCR mangles these constantly ("ENEMY DOVWNED", "TEAMMATE DOW|"), so match
+    fuzzily — but require the kill header to be a *better* match than any of the
+    look-alikes, which is what keeps "TEAMMATE DOWN" out.
+    """
+    letters = _letters(header)
+    if not letters:
+        return False
+
+    def ratio(target):
+        return difflib.SequenceMatcher(None, letters, _letters(target)).ratio()
+
+    kill = ratio(constants.BANNER_HEADER)
+    if kill < constants.HEADER_MIN_RATIO:
+        return False
+    return all(kill > ratio(other) for other in constants.REJECTED_HEADERS)
+
+
+def read_banner(roi):
+    """Return ``(is_kill, player_name)`` for a banner ROI.
+
+    ``player_name`` is the line under the header, or ``""`` when OCR could not
+    make one out.
+    """
+    lines = _ocr_lines(roi)
+    if not lines or not _is_kill_header(lines[0]):
+        return False, ""
+    return True, lines[1] if len(lines) >= 2 else ""
+
+
+def _fold_name(name: str) -> str:
+    """Normalise a name for comparison, folding characters OCR mixes up."""
+    folded = "".join(constants.NAME_CONFUSABLES.get(c, c) for c in name.lower())
+    return re.sub(r"[^a-z0-9]", "", folded)
+
+
+def _same_player(a: str, b: str) -> bool:
+    """True if two OCR readings are probably the same player."""
+    fa, fb = _fold_name(a), _fold_name(b)
+    if not fa or not fb:
+        return False
+    return difflib.SequenceMatcher(None, fa, fb).ratio() >= constants.NAME_MATCH_RATIO
+
+
+def _notice_lag(rate: float) -> float:
+    """How long after a kill we actually notice it, in seconds.
+
+    The banner sweeps in before it reaches the trigger pixel, and we only sample
+    every ``1 / rate`` seconds — so on average we are half an interval late on
+    top of the ramp. Subtracting this puts the recorded time on the kill itself
+    instead of on the moment we spotted its banner.
+    """
+    sampling = 0.5 / rate if rate > 0 else 0.0
+    return constants.BANNER_RAMP_SECONDS + sampling
 
 
 def _merge_names(prev_name: str, new_name: str) -> str:
@@ -92,7 +203,7 @@ def _merge_names(prev_name: str, new_name: str) -> str:
         return prev_name
     if not prev_name or prev_name == "???":
         return new_name
-    if new_name == prev_name:
+    if any(_same_player(part, new_name) for part in prev_name.split(" + ")):
         return prev_name
     return f"{prev_name} + {new_name}"
 
@@ -112,16 +223,59 @@ def _measure_duration(cap, total_frames, fps) -> float:
     return end_ms / 1000.0 if end_ms > 0 else total_frames / fps
 
 
+# ── Frame sampling ──────────────────────────────────────────────────────────────
+
+def _samples(cap, duration, check_interval):
+    """Yield ``(elapsed_seconds, frame)`` at roughly ``check_interval`` apart.
+
+    Walks the file sequentially and uses ``grab()`` to skip past frames we do
+    not want, decoding fully only for the ones we sample. Seeking per sample
+    instead (``set(CAP_PROP_POS_MSEC)``) forces a keyframe seek and a re-decode
+    of most of the GOP every time, which measured ~3x slower on OBS captures.
+
+    Times still come from the container (``CAP_PROP_POS_MSEC``), so VFR footage
+    does not drift.
+    """
+    next_at = 0.0
+    while True:
+        if not cap.grab():
+            return
+        elapsed = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+        if duration and elapsed >= duration:
+            return
+        if elapsed + 1e-9 < next_at:
+            continue
+        ok, frame = cap.retrieve()
+        if not ok:
+            return
+        yield elapsed, frame
+        # Anchor to the frame we actually got, so a long GOP cannot make us
+        # fall behind and sample faster than requested forever after.
+        next_at = elapsed + check_interval
+
+
 # ── Main entry ──────────────────────────────────────────────────────────────────
 
-def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False) -> list:
-    """Scan ``video_path`` and return the detected :class:`Clip` list.
+def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
+           region_override=None, start=0.0, limit=None):
+    """Scan ``video_path``; return ``(clips, completed)``.
+
+    ``completed`` is False when the user interrupted the scan, in which case the
+    clips found so far are still returned — a two-hour scan should never throw
+    away its work because you pressed Ctrl-C near the end.
 
     Raises :class:`VideoError` if the file can't be opened or has no frame rate.
     """
+    validate(settings)
+    if not os.path.exists(video_path):
+        raise VideoError(f"No such file: {video_path}")
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise VideoError(f"Could not open: {video_path}")
+        raise VideoError(
+            f"Could not open: {video_path}\n"
+            "  The file may be corrupt, still being written, or in a codec "
+            "this OpenCV build cannot read.")
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -129,71 +283,102 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False) 
         cap.release()
         raise VideoError(f"Could not read frame rate (got {fps}). Is the file valid?")
 
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    hud = hud_mod.for_size(width, height, region_override)
+    settings.region = hud.region
+
     duration = _measure_duration(cap, total_frames, fps)
+    start = max(0.0, min(start or 0.0, max(0.0, duration - 1)))
+    scan_end = min(duration, start + limit) if limit else duration
     check_interval = 1.0 / settings.rate
-    total_checks = int(duration / check_interval) + 1
+    total_checks = int(max(0.0, scan_end - start) / check_interval) + 1
 
     meta = DetectionMeta(
         source=os.path.basename(video_path), fps=fps, duration=duration,
         total_frames=total_frames, region=settings.region, settings=settings,
         total_checks=total_checks, dry_run=dry_run,
+        layout=hud_mod.describe(hud),
     )
     reporter.begin(meta)
 
     x, y, w, h = settings.region
     clips: list = []
     last_kill = -(settings.cooldown + 1)
+    last_name = ""      # player from the last counted kill, for re-read detection
+    banner_cleared = True   # has the banner gone away since that kill?
     player = ""   # most recent OCR result — shown in preview during cooldown frames
     start_wall = time.time()
+    done = 0
+    completed = True
 
     try:
-        for i in range(total_checks):
-            elapsed = i * check_interval
-            if elapsed >= duration:
+        if start:
+            cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000.0)
+        for elapsed, frame in _samples(cap, duration, check_interval):
+            if elapsed >= scan_end:
                 break
-            cap.set(cv2.CAP_PROP_POS_MSEC, elapsed * 1000.0)
-            ok, frame = cap.read()
-            if not ok:
-                continue
-
-            triggered = _banner_visible(frame)
+            done += 1
+            triggered = _banner_visible(frame, hud)
             reporter.frame(elapsed, triggered)
 
-            frac = (i + 1) / max(total_checks, 1)
+            span = scan_end - start
+            frac = min((elapsed - start) / span, 1.0) if span > 0 else 0.0
             spent = time.time() - start_wall
             eta = (spent / frac - spent) if frac > 0.001 else None
 
             if not triggered:
-                reporter.progress(i + 1, total_checks, elapsed, duration, len(clips), eta)
+                banner_cleared = True
+                reporter.progress(done, total_checks, elapsed, scan_end, len(clips), eta)
                 continue
 
             fh, fw = frame.shape[:2]
             roi = frame[min(y, fh - 1):min(y + h, fh), min(x, fw - 1):min(x + w, fw)]
 
             if (elapsed - last_kill) > settings.cooldown:
-                cut_end = min(duration, elapsed + settings.end_offset)
-                player = _read_player_name(roi)
-                name = player or "???"
+                is_kill, name_text = read_banner(roi)
+                if is_kill:
+                    player = name_text
+                    name = player or "???"
 
-                if clips and (elapsed - last_kill) <= settings.merge_gap:
-                    prev = clips[-1]
-                    clips[-1] = Clip(prev.start, cut_end, _merge_names(prev.name, name))
-                    reporter.extended(clips[-1])
-                else:
-                    clips.append(Clip(max(0.0, elapsed - settings.offset), cut_end, name))
-                    reporter.kill(len(clips), elapsed, clips[-1])
-                last_kill = elapsed
+                    # A banner lingers ~4s, outliving the cooldown, so the same
+                    # one can be read twice. It is only a new kill if the banner
+                    # dropped in between, or a different player is on it now.
+                    reread = not banner_cleared and (name == last_name
+                                                     or _same_player(name, last_name))
+                    if not reread:
+                        # ``elapsed`` is when we *noticed*; the kill landed a
+                        # little earlier (see BANNER_RAMP_SECONDS). Cut around
+                        # the kill, so --offset means what it says.
+                        kill_at = max(0.0, elapsed - _notice_lag(settings.rate))
+                        cut_end = min(duration, kill_at + settings.end_offset)
+                        if clips and (elapsed - last_kill) <= settings.merge_gap:
+                            prev = clips[-1]
+                            clips[-1] = Clip(prev.start, cut_end,
+                                             _merge_names(prev.name, name))
+                            reporter.extended(clips[-1])
+                        else:
+                            clips.append(
+                                Clip(max(0.0, kill_at - settings.offset), cut_end, name))
+                            reporter.kill(len(clips), kill_at, clips[-1])
+                        last_kill = elapsed
+                        last_name = name
+                        banner_cleared = False
 
             if settings.preview and _preview(roi, player):
                 break
 
-            reporter.progress(i + 1, total_checks, elapsed, duration, len(clips), eta)
+            reporter.progress(done, total_checks, elapsed, scan_end, len(clips), eta)
+    except KeyboardInterrupt:
+        # Keep what we found. The CLI writes it and says the scan was partial.
+        completed = False
+        reporter.aborted(elapsed if done else start, scan_end, len(clips))
     finally:
         cap.release()
         if settings.preview:
             cv2.destroyAllWindows()
 
-    return clips
+    return clips, completed
 
 
 def _preview(roi, player) -> bool:

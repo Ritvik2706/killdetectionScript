@@ -4,15 +4,19 @@ Commands:
     detect      scan a video for kills, then auto-build the highlight EDL
     export      build a highlight EDL from an existing timestamps.txt
     calibrate   re-find the scan region / trigger pixel on a frame
+    doctor      check this machine has everything killcutter needs
+    diagnose    check the HUD constants against a clip when detection stops working
 
 Global flags (before or after the command): --config, --write-config,
 --no-color, --version. Config values seed argparse defaults; explicit flags win.
 """
 
 import argparse
+import os
 import sys
 
-from killcutter import __version__, config, detection, export, reporting, video
+from killcutter import (__version__, config, detection, environment, export,
+                        reporting, video)
 from killcutter import ui
 from killcutter.constants import DEFAULT_CLIPS_DIR, DEFAULT_REGION
 from killcutter.detection import DetectionSettings
@@ -62,8 +66,12 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
                     help="Merge kills within this many seconds into one clip (default: 10)")
     pd.add_argument("--cooldown", type=float, default=d.get("cooldown", 3.0),
                     help="Min seconds between detections (default: 3)")
-    pd.add_argument("--rate", type=float, default=d.get("rate", 2),
-                    help="Frame samples per second (default: 2)")
+    pd.add_argument("--rate", type=float, default=d.get("rate", 4),
+                    help="Frame samples per second (default: 4)")
+    pd.add_argument("--start", type=float, default=0.0,
+                    help="Skip to this many seconds in before scanning (default: 0)")
+    pd.add_argument("--limit", type=float,
+                    help="Only scan this many seconds of footage (default: all)")
     pd.add_argument("--output", default="timestamps.txt",
                     help="Where to write detected clips (default: timestamps.txt)")
     pd.add_argument("--preview", action="store_true",
@@ -87,6 +95,23 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
     px.add_argument("--fps", type=float, default=e.get("fps"),
                     help="Authoring fps; MUST match your Premiere sequence (e.g. 59.94)")
 
+    # diagnose -------------------------------------------------------------
+    pg = sub.add_parser("diagnose", parents=[common],
+                        help="Check the HUD constants against a clip")
+    pg.add_argument("--video", help="Video to check (omit to pick from the clips folder)")
+    pg.add_argument("--region", nargs=4, type=int, metavar=("X", "Y", "W", "H"),
+                    default=cfg_region, help=f"Scan region override (default: {DEFAULT_REGION})")
+    pg.add_argument("--start", type=float,
+                    help="Where to start scanning, seconds (default: 10%% into the file)")
+    pg.add_argument("--span", type=float, default=600.0,
+                    help="How many seconds of footage to sample (default: 600)")
+    pg.add_argument("--rate", type=float, default=d.get("rate", 4),
+                    help="Frame samples per second (default: 4)")
+
+    # doctor ---------------------------------------------------------------
+    sub.add_parser("doctor", parents=[common],
+                   help="Check this machine has everything killcutter needs")
+
     # calibrate ------------------------------------------------------------
     pc = sub.add_parser("calibrate", parents=[common],
                         help="Re-find the scan region / trigger pixel on a frame")
@@ -109,33 +134,57 @@ def _clips_dir(cfg) -> str:
 def cmd_detect(args, cfg, cfg_path) -> int:
     reporting.banner("kill scan", cfg_path)
     video_path = args.video or video.pick(_clips_dir(cfg))
-    region = tuple(args.region) if args.region else DEFAULT_REGION
+    override = tuple(args.region) if args.region else None
 
     settings = DetectionSettings(
-        region=region, offset=args.offset, end_offset=args.end_offset,
-        merge_gap=args.merge_gap, cooldown=args.cooldown, rate=args.rate,
+        region=override or DEFAULT_REGION, offset=args.offset,
+        end_offset=args.end_offset, merge_gap=args.merge_gap,
+        cooldown=args.cooldown, rate=args.rate,
         preview=args.preview, debug=args.debug,
     )
     reporter = reporting.ConsoleReporter(debug=args.debug)
-    clips = detection.detect(video_path, settings, reporter, dry_run=args.dry_run)
+    clips, completed = detection.detect(video_path, settings, reporter,
+                                        dry_run=args.dry_run,
+                                        region_override=override,
+                                        start=args.start, limit=args.limit)
 
     reporting.detection_results(clips)
     if not clips:
-        return 0
+        return 0 if completed else 130
     if args.dry_run:
         reporting.dry_run_note()
         return 0
 
-    with open(args.output, "w") as f:
-        for clip in clips:
-            f.write(f"{clip.start:.3f} {clip.end:.3f} {clip.name}\n")
+    _write_timestamps(args.output, clips)
     reporting.timestamps_saved(args.output)
+    if not completed:
+        reporting.partial_note(args.output)
 
-    auto_export = config.section(cfg, "detect").get("export", True) and not args.no_export
+    auto_export = (config.section(cfg, "detect").get("export", True)
+                   and not args.no_export and completed)
     if auto_export:
         reporting.export_handoff()
         _do_export(video_path, args.output)
+    elif not completed:
+        reporting.export_skipped(args.output)
+        return 130
     return 0
+
+
+def _write_timestamps(path, clips) -> None:
+    """Write clips atomically, so an interrupted write cannot truncate the file."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        for clip in clips:
+            f.write(f"{clip.start:.3f} {clip.end:.3f} {clip.name}\n")
+    os.replace(tmp, path)
+
+
+def cmd_doctor(args, cfg, cfg_path) -> int:
+    reporting.banner("doctor", cfg_path)
+    results = environment.check(clips_dir=_clips_dir(cfg), config_path=cfg_path)
+    reporting.doctor(results)
+    return 1 if environment.blocking_failures(results) else 0
 
 
 def cmd_export(args, cfg, cfg_path) -> int:
@@ -156,11 +205,30 @@ def _do_export(video_path, timestamps_path, *, name="Kill Highlights", fps=None,
     reporting.export_saved(plan)
 
 
+def cmd_diagnose(args, cfg, cfg_path) -> int:
+    from killcutter import diagnose as diagnose_mod
+    reporting.banner("diagnose", cfg_path)
+    video_path = args.video or video.pick(_clips_dir(cfg))
+    region = tuple(args.region) if args.region else DEFAULT_REGION
+    report = diagnose_mod.diagnose(
+        video_path, region, start=args.start, span=args.span, rate=args.rate,
+        reporter=reporting.ConsoleReporter(),
+    )
+    print(ui.CLEAR_LINE, end="")
+    reporting.diagnosis(report)
+    return 0 if not report.problems else 1
+
+
 def cmd_calibrate(args, cfg, cfg_path) -> int:
     from killcutter import calibration
     reporting.banner("calibrate", cfg_path)
     video_path = args.video or video.pick(_clips_dir(cfg))
-    region = tuple(args.region) if args.region else DEFAULT_REGION
+    if args.region:
+        region = tuple(args.region)
+    else:
+        from killcutter import hud as hud_mod
+        w, h = video.frame_size(video_path)
+        region = hud_mod.for_size(w, h).region
     if args.pixel:
         calibration.calibrate_pixel(video_path, args.seek, region)
     else:
@@ -168,7 +236,9 @@ def cmd_calibrate(args, cfg, cfg_path) -> int:
     return 0
 
 
-_COMMANDS = {"detect": cmd_detect, "export": cmd_export, "calibrate": cmd_calibrate}
+_COMMANDS = {"detect": cmd_detect, "export": cmd_export,
+             "calibrate": cmd_calibrate, "diagnose": cmd_diagnose,
+             "doctor": cmd_doctor}
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────────
@@ -188,6 +258,7 @@ def main(argv=None) -> int:
         config.write_default(known.write_config or None)
         return 0
 
+    environment.configure_tesseract()
     cfg, cfg_path = config.load(known.config)
     if config.section(cfg, "ui").get("color") is False:
         ui.set_color(False)

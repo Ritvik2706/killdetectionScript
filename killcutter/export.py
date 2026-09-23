@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from killcutter import video
 from killcutter.errors import VideoError
 from killcutter.models import Clip
-from killcutter.timecode import ntsc_rate, is_drop_frame, seconds_to_timecode
+from killcutter.timecode import drift_seconds, resolve_fps, seconds_to_timecode
 
 
 def read_timestamps(path) -> list:
@@ -39,22 +39,34 @@ class ExportPlan:
     fps: float
     is_drop: bool
     out_path: str
-    ntsc_note: str        # "" unless the rate was NTSC-corrected
+    fps_note: str         # "" unless the probed rate needed snapping
+    fps_warning: str      # "" unless the authored rate disagrees with the media
     total_seconds: float
 
 
 def plan(video_path, clips, *, fps_override=None, name="Kill Highlights", output=None) -> ExportPlan:
     """Resolve the authoring fps, output path and drop-frame mode for a reel."""
-    raw_fps, _ = video.probe(video_path)
+    raw_fps, frames, duration = video.measure(video_path)
     if raw_fps <= 0:
         raise VideoError(f"Could not read frame rate (got {raw_fps}). Is the file valid?")
 
-    # Author at the rate Premiere conforms to. An explicit --fps wins; otherwise
-    # NTSC-correct the reported rate (60 -> 59.94) so cuts don't drift.
-    fps = fps_override if fps_override else ntsc_rate(raw_fps)
-    ntsc_note = ""
-    if not fps_override and abs(fps - raw_fps) > 0.005:
-        ntsc_note = f"{raw_fps:.3f} → {fps:.3f} (NTSC corrected)"
+    # Author at the rate the media actually runs at. An explicit --fps wins.
+    fps = fps_override if fps_override else resolve_fps(raw_fps)
+    fps_note = ""
+    if not fps_override and abs(fps - raw_fps) > 0.0005:
+        fps_note = f"{raw_fps:.5f} → {fps:.3f} (snapped to the exact rate)"
+
+    # Cross-check the authored rate against the container itself. A rate that is
+    # off by even 0.1% is invisible in the first minutes and pushes cuts seconds
+    # early by the end of a long recording, so say so rather than drift quietly.
+    fps_warning = ""
+    actual = video.measured_fps(frames, duration)
+    if actual and abs(fps - actual) / actual > 0.0005:
+        last = max((c.end for c in clips), default=0.0)
+        off = drift_seconds(fps, actual, last)
+        fps_warning = (f"authoring at {fps:.3f} but the file measures "
+                       f"{actual:.3f} fps — the last cut lands {off:+.1f}s off. "
+                       f"Override with --fps {actual:.3f} if that is wrong.")
 
     basename = os.path.basename(video_path)
     stem = os.path.splitext(basename)[0]
@@ -63,9 +75,13 @@ def plan(video_path, clips, *, fps_override=None, name="Kill Highlights", output
         sequence_name=name,
         video_basename=basename,
         fps=fps,
-        is_drop=is_drop_frame(fps),
+        # Timecodes are authored non-drop, so the EDL must declare non-drop.
+        # Drop-frame only relabels frames; claiming it while emitting non-drop
+        # labels makes Premiere read every cut at the wrong frame.
+        is_drop=False,
         out_path=output or f"{stem}_highlights.edl",
-        ntsc_note=ntsc_note,
+        fps_note=fps_note,
+        fps_warning=fps_warning,
         total_seconds=sum(c.duration for c in clips),
     )
 
