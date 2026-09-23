@@ -19,8 +19,35 @@ python -m venv .venv
 ```
 
 On Debian/Ubuntu, install `python3-tk`, `tesseract-ocr`, and optional `ffmpeg`
-with your package manager. On WSL the GUI requires WSLg or another display
-server. A native Windows build does not use WSL.
+with your package manager. A native Windows build does not use WSL.
+
+### On WSL: automatic handoff to Windows Python
+
+Launched inside WSL, `killcutter-desktop` / `python -m killcutter.gui` runs the
+window with **Windows** Python instead of WSLg. WSLg mirrors Linux windows to
+Windows over RDP, and when a Windows window manager resizes that mirror (any
+tiling WM, e.g. GlazeWM) the new size never reaches X — the window stays blank.
+The app cannot see that resize, so it avoids WSLg altogether.
+
+On each launch it:
+
+1. Finds a real Windows Python 3.11+ with Tk (`py.exe`, `python.exe`, the usual
+   install folders; the Microsoft Store placeholder is ignored). If there is
+   none it offers `winget install Python.Python.3.12` — only in a terminal, and
+   only after you answer yes.
+2. Keeps a private venv in `%LOCALAPPDATA%\killcutter\wsl-desktop\venv` and
+   installs the runtime + `gui` dependencies into it, again whenever they change.
+3. Offers to install Tesseract with winget if Windows has none (asked once;
+   the desktop still opens without it).
+4. Runs this checkout's code live over `\\wsl.localhost`, so edits in WSL take
+   effect on the next launch with no reinstall.
+
+The Windows window uses Windows' own config location
+(`%USERPROFILE%\.config\killcutter\config.toml`) unless you pass `--config`,
+which is translated to a Windows path. Paths saved there are Windows paths.
+
+`--wslg` or `KILLCUTTER_WSLG=1` keeps the window inside WSLg. If the handoff
+fails, the reason is printed and it falls back to WSLg.
 
 Windows PowerShell (install Python with Tcl/Tk support):
 
