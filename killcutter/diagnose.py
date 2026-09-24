@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 import cv2
 
-from killcutter import constants, hud as hud_mod
+from killcutter import constants, hud as hud_mod, traits as traits_mod
 from killcutter.detection import (_banner_visible, _is_kill_header, _ocr_lines,
                                   _measure_duration, _pixel, _pixel_is_accent,
                                   _pixel_is_white, _samples)
@@ -59,6 +59,13 @@ class Diagnosis:
     white_pixel: tuple = constants.TRIGGER_PIXEL_WHITE
     accent_pixel: tuple = constants.TRIGGER_PIXEL_ACCENT
 
+    # The bottom-centre ELIMINATED strip, which the traits read (see
+    # killcutter.traits). It is a separate region from the banner and can break
+    # on its own, so it gets its own counters rather than hiding behind them.
+    eliminated_region: tuple = constants.ELIMINATED_REGION
+    eliminated_seen: int = 0       # frames where the red name text was present
+    eliminated_hashed: int = 0     # ...of those, frames carrying a "#" suffix
+
     @property
     def problems(self) -> list:
         """Human-readable diagnoses, most likely cause first. Empty means healthy."""
@@ -72,6 +79,13 @@ class Diagnosis:
         if not self.sampled:
             out.append("No frames were sampled — the video could not be read.")
             return out
+        if self.eliminated_seen == 0 and self.sampled:
+            out.append(
+                f"The ELIMINATED line never appeared in {self.eliminated_region}. "
+                "Bot-vs-real-player sorting ('--exclude bot') cannot work until "
+                "that is fixed: either this stretch of footage has no eliminations, "
+                "or the strip has moved and ELIMINATED_REGION needs re-measuring.")
+
         if self.kills:
             return out
 
@@ -137,6 +151,7 @@ def diagnose(video_path, region=None, *, start=None, span=600.0, rate=2.0,
         scan_start=start, scan_span=span,
         layout=hud_mod.describe(hud),
         white_pixel=hud.white, accent_pixel=hud.accent,
+        eliminated_region=hud.eliminated,
     )
 
     counts = Counter()
@@ -155,6 +170,13 @@ def diagnose(video_path, region=None, *, start=None, span=600.0, rate=2.0,
             if reporter is not None:
                 reporter.progress(report.sampled, int(span * rate) + 1,
                                   elapsed, end_at, report.kills, None)
+
+            # The ELIMINATED strip is checked on every sample, not just gated
+            # ones: it trails the banner and is often up when no banner is.
+            verdict = traits_mod.real_player(_eliminated_roi(frame, hud), hud.scale)
+            if verdict is not None:
+                report.eliminated_seen += 1
+                report.eliminated_hashed += bool(verdict)
 
             white = _pixel_is_white(frame, hud.white)
             accent = _pixel_is_accent(frame, hud.accent)
@@ -190,6 +212,12 @@ def diagnose(video_path, region=None, *, start=None, span=600.0, rate=2.0,
         for head, n in counts.most_common()
     ]
     return report
+
+
+def _eliminated_roi(frame, hud):
+    x, y, w, h = hud.eliminated
+    fh, fw = frame.shape[:2]
+    return frame[min(y, fh):min(y + h, fh), min(x, fw):min(x + w, fw)]
 
 
 def _median_rgb(samples) -> tuple:

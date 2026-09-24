@@ -271,6 +271,11 @@ def diagnosis(report) -> None:
         stage("both (OCR runs)", report.gated),
         stage("header confirmed", report.kills),
     ]
+    rows += ["", ui.paint("ELIMINATED strip", ui.GREY)
+             + ui.paint(f"  x={report.eliminated_region[0]} y={report.eliminated_region[1]} "
+                        f"w={report.eliminated_region[2]} h={report.eliminated_region[3]}", ui.DIM),
+             stage("name line seen", report.eliminated_seen),
+             stage("with # (real player)", report.eliminated_hashed)]
     if report.accent_samples:
         med = tuple(int(sum(c[i] for c in report.accent_samples)
                         / len(report.accent_samples)) for i in range(3))
@@ -344,3 +349,94 @@ def export_skipped(timestamps_path) -> None:
 def partial_note(path) -> None:
     print("  " + ui.paint("Scan was interrupted, so this file covers only the part "
                           "that was scanned.", ui.DIM))
+
+
+# ── Traits ──────────────────────────────────────────────────────────────────────
+
+def trait_list(traits) -> None:
+    """Print every registered trait and how to ask for it."""
+    rows = []
+    for trait in traits:
+        rows.append(ui.paint(f"{trait.name:<16}", ui.TEAL, bold=True)
+                    + ui.paint(trait.summary, ui.WHITE))
+        if trait.negative_name:
+            rows.append(ui.paint(f"{'':<16}", ui.GREY)
+                        + ui.paint(f"negate with: {trait.negative_name}", ui.DIM))
+        if trait.detail:
+            rows.append(ui.paint(f"{'':<16}", ui.GREY) + ui.paint(trait.detail, ui.GREY))
+        rows.append("")
+    rows += [ui.paint("  killcutter detect --exclude bot", ui.WHITE),
+             ui.paint("  killcutter export --require real-player", ui.WHITE)]
+    print(ui.panel(rows, title="TRAITS", color=ui.TEAL))
+
+
+def traits_filtered(dropped, require, exclude, keep_unknown) -> None:
+    """Say what the trait filters removed, and why, so it is never silent."""
+    asked = ", ".join([f"require {t}" for t in require]
+                      + [f"exclude {t}" for t in exclude])
+    n = len(dropped)
+    print("  " + ui.badge("FILTERED", fg=ui.INK, bg=ui.AMBER) + " "
+          + ui.paint(f"{n} clip{'s' if n != 1 else ''} dropped  ({asked})", ui.WHITE))
+    if keep_unknown:
+        print("  " + ui.paint("Clips whose traits could not be determined were kept; "
+                              "pass --drop-unknown to remove those too.", ui.DIM))
+    for clip in dropped[:8]:
+        print("    " + ui.paint(f"{format_duration(clip.start)} – "
+                                f"{format_duration(clip.end)}", ui.GREY)
+              + "  " + ui.paint(clip.name, ui.DIM))
+    if n > 8:
+        print("    " + ui.paint(f"… and {n - 8} more", ui.DIM))
+    print()
+
+
+def trait_report(report) -> None:
+    """Print the sampling result from ``killcutter traits --video``."""
+    info = [
+        ui.kv("Source", report.source, val_color=ui.WHITE),
+        ui.kv("Trait", report.trait, val_color=ui.WHITE),
+        ui.kv("Region", f"x={report.region[0]}  y={report.region[1]}  "
+                        f"w={report.region[2]}  h={report.region[3]}"),
+        ui.kv("HUD layout", report.layout),
+        ui.kv("Scanned", f"{format_clock(report.scan_start)} → "
+                         f"{format_clock(report.scan_start + report.scan_span)}"
+                         f"   ·   {report.sampled} samples"),
+    ]
+    print(ui.panel(info, title="TRAIT CHECK", color=ui.TEAL))
+    print()
+
+    def row(label, count, colour):
+        pct = 100 * count / max(report.sampled, 1)
+        return (ui.paint(f"{label:<22}", ui.GREY)
+                + ui.paint(f"{count:5d} frames", colour, bold=True)
+                + ui.paint(f"  ({pct:4.1f}%)", ui.DIM))
+
+    rows = [row("yes", report.yes, ui.GREEN),
+            row("no", report.no, ui.AMBER),
+            row("not on screen", report.unknown, ui.GREY)]
+    if report.hit_scores:
+        head = report.headroom
+        colour = ui.GREEN if head is None or head >= 0.05 else ui.AMBER
+        rows += ["", ui.paint("match score (hits)    ", ui.GREY)
+                 + ui.paint(f"{min(report.hit_scores):.2f} – {max(report.hit_scores):.2f}",
+                            ui.WHITE),
+                 ui.paint("headroom over cutoff  ", ui.GREY)
+                 + ui.paint(f"{head:+.2f}", colour, bold=True)]
+    if report.miss_scores:
+        rows.append(ui.paint("best score (rejected) ", ui.GREY)
+                    + ui.paint(f"{max(report.miss_scores):.2f}", ui.WHITE))
+    if report.dump_dir:
+        rows += ["", ui.paint("crops written to        ", ui.GREY)
+                 + ui.paint(report.dump_dir, ui.WHITE)]
+    print(ui.panel(rows, title="VERDICTS", color=ui.CYAN))
+    head = report.headroom
+    if head is not None and head < 0.05:
+        print("\n  " + ui.badge("THIN MARGIN", fg=ui.INK, bg=ui.AMBER) + " "
+              + ui.paint(f"The weakest confirmed frame cleared the cutoff by only "
+                         f"{head:+.2f}. Slightly worse footage would start reading "
+                         "real players as bots — send this report before trusting "
+                         "'--exclude bot' on a whole session.", ui.WHITE))
+    if not report.decided:
+        print("\n  " + ui.badge("CHECK", fg=ui.INK, bg=ui.AMBER) + " "
+              + ui.paint("The trait's evidence never appeared. Either this slice of "
+                         "footage has none, or the region has moved — try a different "
+                         "--start, then 'killcutter calibrate'.", ui.WHITE))

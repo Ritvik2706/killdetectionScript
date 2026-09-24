@@ -17,6 +17,7 @@ python -m killcutter detect              # pick a clip, scan, auto-export
 python -m killcutter export              # build an EDL from an existing timestamps.txt
 python -m killcutter calibrate           # re-find the region / trigger pixel
 python -m killcutter diagnose            # check the HUD constants against a clip
+python -m killcutter traits              # list traits / check one against footage
 python -m killcutter doctor              # check this machine has the dependencies
 ```
 
@@ -39,6 +40,8 @@ output goes through `reporting.py` / `ui/`. See `docs/ARCHITECTURE.md` for the f
 | `video.py` | Clip discovery, metadata probing, the interactive picker (`pick`) |
 | `calibration.py` | OpenCV region / trigger-pixel calibration helpers |
 | `config.py` | Layered TOML config (`--config`, `--write-config`) |
+| `traits.py` | Tri-state per-kill facts (`real-player`), their probes, and the clip filters |
+| `traitcheck.py` | Samples footage to verify a trait's accuracy before you trust it |
 | `timecode.py` | Pure time/timecode/frame-rate math (well unit-tested) |
 | `models.py` | `Clip` dataclass shared across the pipeline |
 | `constants.py` | Tunables: region, trigger pixels, thresholds, header matching, clips dir |
@@ -102,8 +105,103 @@ so the pixel gate cannot reject it.
 | `--preview` | off | Show the scan region + OCR live (tune a new clip first) |
 | `--dry-run` | off | Print detected clips without writing `timestamps.txt` |
 | `--no-export` | off | Stop after `timestamps.txt`; don't auto-run the exporter |
+| `--require TRAIT` / `--exclude TRAIT` | — | Keep / drop clips by trait, e.g. `--exclude bot` (repeatable; also on `export`) |
+| `--drop-unknown` | off | Also drop clips whose trait could not be determined |
+| `--no-traits` | off | Skip trait probing entirely |
 
 Global flags (any command): `--config PATH`, `--write-config [PATH]`, `--no-color`, `--version`.
+
+## Traits (sorting kills)
+
+A **trait** is one tri-state fact about a kill — `True`, `False`, or `None` for
+"the evidence wasn't on screen". Detection records every registered trait on every
+clip, writes them into `timestamps.txt` as a `[real-player=yes]` suffix, and
+`--require` / `--exclude` filter on them. Because the traits are stored,
+`export --exclude bot` re-filters an existing `timestamps.txt` without rescanning.
+
+**Unknown is never treated as false.** By default a clip whose trait could not be
+determined is kept, so a filter can't silently cost you a highlight; `--drop-unknown`
+opts into the strict reading. Adding a trait means registering one `Trait` in
+`traits.py`; nothing else in the pipeline needs to know it exists.
+
+### `real-player` (negate with `bot`)
+
+CoD suffixes a real account's name with `#<Activision id>`; bots have a bare name.
+
+- **That suffix is not on the ENEMY DOWNED banner** — only on the bottom-centre
+  **ELIMINATED:** line, which is a separate region (`ELIMINATED_REGION`, resolved
+  per-resolution by `hud.for_size`). It scales from the left, not the right edge,
+  because it sits near screen centre rather than against an edge.
+- **OCR cannot read the `#`.** Tesseract returns it as `s` on real footage
+  (`Twitch ZenXe#1028757` → `Twitch ZenxXes 1028757`) on every PSM tried, which is
+  exactly the error that would make the feature useless. The glyph is found
+  geometrically instead.
+- What makes that reliable is the colour: the victim's name is saturated red while
+  `ELIMINATED:` beside it is white, so `name_mask` isolates precisely the name and
+  its suffix and rejects the whole game world behind it — measured on real frames
+  with zero background bleed.
+- On that clean binary the `#` must be confirmed **twice**: a template match
+  locates it, and `looks_like_hash` confirms the topology — two near-full-width
+  crossbars crossing two full-height stems, with ink overhanging both. `E` and `8`
+  have three bars, `H` has one, `=` has no stems. **Both checks are load-bearing.**
+  A merged digit pair in real footage passes `looks_like_hash` (only the template
+  rejects it); an OpenCV vector `#` passes the template poorly (only at a threshold
+  so low the false positives explode). Neither alone works — measured, structural-only
+  gave 84% false positives, template-only gave 34% recall off-font.
+- **The template scale is measured from the text, not the frame.** `hud.scale`
+  is only a guess — the game has its own HUD-size slider — and
+  `_candidate_scales` reads the font size off the mask's text band, then searches a
+  few steps either side. This is the single biggest reliability win here: with one
+  template sized from the frame alone, a 1.2× error in that guess dropped per-frame
+  recall from 78% to **9%**. With the search, per-kill accuracy is unchanged across
+  a 0.8×–1.45× error.
+- **`BAR_FILL` is relative to the glyph's own fullest row, not absolute.** Video
+  compression thickens these strokes until the stems alone fill 80% of the glyph
+  width, so a fixed 0.8 cutoff merges the crossbar gaps and the whole glyph reads
+  as one solid band. Verified: an absolute cutoff passed the PNG and failed the
+  same frame re-encoded.
+- The ELIMINATED line only appears for the **finishing** blow, so a knock a
+  teammate confirms yields a kill banner with no line at all → `None`. Evidence is
+  therefore gathered over a `WINDOW_SECONDS` (3s) window after the kill, on every
+  sampled frame rather than only triggered ones.
+- **`min_votes=2`: one positive frame does not decide a kill.** Because a single
+  `True` decides the whole clip, per-frame false positives *compound* over the ~12
+  frame window while per-frame misses wash out. Measured: a 2% per-frame false
+  positive rate became **17% per kill** under a one-vote rule. Two agreeing frames
+  costs no measurable recall. Windows that only yielded one or two decidable frames
+  fall back to a single vote so thin evidence is not punished.
+- **Do not tune `HASH_MATCH_MIN` on composed strips alone.** They paste clean
+  bitmaps and score higher than genuine H.264 footage; doing exactly that once
+  pushed the cutoff to 0.65, which the corpus called free and which silently broke
+  every real re-encoded frame (they peak near 0.60). Always check a real clip, and
+  watch the headroom readout described below.
+- The two errors are **not symmetric**: a missed `#` marks a real player as a bot
+  and `--exclude bot` throws the highlight away, while a false `#` merely keeps a
+  bot clip. Prefer headroom over the last point of false-positive rate.
+
+Measured on strips composed from glyphs cut out of the real screenshots, scored
+per kill over a 12-frame window: **96.8% recall, 0% false positives**, invariant
+across a 0.8×–1.45× scale error. Probe cost is 0.07ms on an empty strip and 2.7ms
+worst case, ~32ms per kill — negligible against a decode-bound scan.
+
+### Verifying a trait
+
+`python -m killcutter traits --video clip.mp4 --dump DIR` samples footage, prints
+yes / no / not-on-screen counts, and writes every crop it judged to `DIR` named by
+its verdict. A threshold tuned on a couple of screenshots is a guess — check it
+against real footage before trusting it.
+
+It also prints the **headroom**: how far the weakest confirmed frame cleared
+`HASH_MATCH_MIN`. Under +0.05 it warns, because that is the state in which
+slightly worse footage starts reading real players as bots. Compare it against
+the *best rejected* score too — a large gap between them (0.59 vs 0.00 on the
+test clip) means the discrimination is healthy and only the cutoff placement is
+delicate.
+
+`diagnose` also covers this region now: the PIPELINE panel reports how many frames
+showed the name line and how many carried a `#`, and flags it when the strip never
+appears at all — so a HUD move that breaks bot sorting is caught by the same tool
+as a HUD move that breaks detection.
 
 ## When detection breaks after a game update
 

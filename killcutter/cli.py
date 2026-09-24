@@ -16,7 +16,7 @@ import os
 import sys
 
 from killcutter import (__version__, config, detection, environment, export,
-                        reporting, video)
+                        reporting, traits as traits_mod, video)
 from killcutter import ui
 from killcutter.ranges import parse_timestamp
 from killcutter import outputs
@@ -34,6 +34,25 @@ def _global_flags() -> argparse.ArgumentParser:
     p.add_argument("--no-color", action="store_true", dest="no_color",
                    help="Disable ANSI colour output")
     return p
+
+
+def _trait_flags(parser, cfg) -> None:
+    """Attach the trait filter flags to a subcommand.
+
+    Shared by detect and export so an existing timestamps.txt can be re-filtered
+    without rescanning the footage.
+    """
+    d = config.section(cfg, "detect")
+    parser.add_argument("--require", action="append", default=list(d.get("require", [])),
+                        metavar="TRAIT",
+                        help="Keep only clips with this trait (repeatable)")
+    parser.add_argument("--exclude", action="append", default=list(d.get("exclude", [])),
+                        metavar="TRAIT",
+                        help="Drop clips with this trait, e.g. --exclude bot (repeatable)")
+    parser.add_argument("--drop-unknown", action="store_true", dest="drop_unknown",
+                        default=bool(d.get("drop_unknown", False)),
+                        help="Also drop clips whose trait could not be determined "
+                             "(default: keep them)")
 
 
 def _build_parser(cfg, common) -> argparse.ArgumentParser:
@@ -87,6 +106,9 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
                     default=d.get("render_clips", False), help="Render MP4 highlights with FFmpeg")
     pd.add_argument("--output", default=None,
                     help="Where to write detected clips (default: timestamps.txt)")
+    _trait_flags(pd, cfg)
+    pd.add_argument("--no-traits", action="store_true", dest="no_traits",
+                    help="Skip trait probing entirely (slightly faster scan)")
     pd.add_argument("--preview", action="store_true",
                     help="Show the scan region live with OCR result (for tuning)")
     pd.add_argument("--debug", action="store_true",
@@ -109,6 +131,7 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
                     help="Sequence name shown in Premiere (default: 'Kill Highlights')")
     px.add_argument("--fps", type=float, default=e.get("fps"),
                     help="Authoring fps; MUST match your Premiere sequence (e.g. 59.94)")
+    _trait_flags(px, cfg)
 
     # diagnose -------------------------------------------------------------
     pg = sub.add_parser("diagnose", parents=[common],
@@ -122,6 +145,21 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
                     help="How many seconds of footage to sample (default: 600)")
     pg.add_argument("--rate", type=float, default=d.get("rate", 4),
                     help="Frame samples per second (default: 4)")
+
+    # traits ---------------------------------------------------------------
+    pt = sub.add_parser("traits", parents=[common],
+                        help="List the available traits, or check one against footage")
+    pt.add_argument("--video", help="Sample this video instead of just listing traits")
+    pt.add_argument("--trait", default="real-player",
+                    help="Which trait to check (default: real-player)")
+    pt.add_argument("--start", type=parse_timestamp, default=0.0,
+                    help="Where to start sampling, seconds or HH:MM:SS")
+    pt.add_argument("--span", type=float, default=600.0,
+                    help="How many seconds of footage to sample (default: 600)")
+    pt.add_argument("--rate", type=float, default=1.0,
+                    help="Frame samples per second (default: 1)")
+    pt.add_argument("--dump", metavar="DIR",
+                    help="Write every sampled crop, with its verdict, to this folder")
 
     sub.add_parser("ui", parents=[common], help="Open the interactive workspace")
     sub.add_parser("settings", parents=[common], help="Edit and save default settings")
@@ -172,6 +210,8 @@ def cmd_detect(args, cfg, cfg_path) -> int:
             if not shutil.which("ffmpeg"):
                 from killcutter.errors import DependencyError
                 raise DependencyError("Rendering video clips requires FFmpeg on PATH.")
+    for spec in list(args.require) + list(args.exclude):
+        traits_mod.get(spec)     # raises ConfigError now rather than after the scan
     override = tuple(args.region) if args.region else None
 
     settings = DetectionSettings(
@@ -179,6 +219,7 @@ def cmd_detect(args, cfg, cfg_path) -> int:
         end_offset=args.end_offset, merge_gap=args.merge_gap,
         cooldown=args.cooldown, rate=args.rate,
         preview=args.preview, debug=args.debug,
+        traits=not args.no_traits,
     )
     reporter = reporting.ConsoleReporter(debug=args.debug)
     clips, completed = detection.detect(video_path, settings, reporter,
@@ -186,6 +227,11 @@ def cmd_detect(args, cfg, cfg_path) -> int:
                                         region_override=override,
                                         start=args.start, limit=args.limit, end=args.end)
 
+    clips, dropped = traits_mod.select(clips, args.require, args.exclude,
+                                       keep_unknown=not args.drop_unknown)
+    if dropped:
+        reporting.traits_filtered(dropped, args.require, args.exclude,
+                                  keep_unknown=not args.drop_unknown)
     reporting.detection_results(clips)
     if not clips:
         return 0 if completed else 130
@@ -214,8 +260,7 @@ def cmd_detect(args, cfg, cfg_path) -> int:
 
 def _write_timestamps(path, clips) -> None:
     """Write clips atomically, so an interrupted write cannot truncate the file."""
-    outputs.atomic_text(path, "".join(
-        f"{clip.start:.3f} {clip.end:.3f} {clip.name}\n" for clip in clips))
+    outputs.atomic_text(path, export.format_timestamps(clips))
 
 
 
@@ -231,14 +276,25 @@ def cmd_export(args, cfg, cfg_path) -> int:
     video_path = args.video or video.pick(_clips_dir(cfg))
     _do_export(video_path, args.timestamps,
                name=args.name, fps=args.fps, output=args.output or
-               outputs.destination(video_path, args.edl_dir, "_highlights.edl"))
+               outputs.destination(video_path, args.edl_dir, "_highlights.edl"),
+               require=args.require, exclude=args.exclude,
+               keep_unknown=not args.drop_unknown)
     return 0
 
 
-def _do_export(video_path, timestamps_path, *, name="Kill Highlights", fps=None, output=None):
+def _do_export(video_path, timestamps_path, *, name="Kill Highlights", fps=None,
+               output=None, require=(), exclude=(), keep_unknown=True):
     clips = export.read_timestamps(timestamps_path)
     if not clips:
         raise NoClipsError(f"No clips found in {timestamps_path}")
+    if require or exclude:
+        clips, dropped = traits_mod.select(clips, require, exclude, keep_unknown)
+        if dropped:
+            reporting.traits_filtered(dropped, require, exclude, keep_unknown)
+        if not clips:
+            raise NoClipsError(
+                f"Every clip in {timestamps_path} was filtered out by the trait "
+                f"filters. Loosen --require/--exclude, or drop --drop-unknown.")
     plan = export.plan(video_path, clips, fps_override=fps, name=name, output=output)
     outputs.validate_paths([video_path, timestamps_path], [plan.out_path])
     plan.out_path = outputs.prepare_file(plan.out_path)
@@ -251,7 +307,10 @@ def cmd_diagnose(args, cfg, cfg_path) -> int:
     from killcutter import diagnose as diagnose_mod
     reporting.banner("diagnose", cfg_path)
     video_path = args.video or video.pick(_clips_dir(cfg))
-    region = tuple(args.region) if args.region else DEFAULT_REGION
+    # Pass None, not DEFAULT_REGION, when no --region was given: an explicit
+    # region is taken literally and never rescaled, so defaulting to the 1080p
+    # constant here made diagnose scan the wrong box on any other resolution.
+    region = tuple(args.region) if args.region else None
     report = diagnose_mod.diagnose(
         video_path, region, start=args.start, span=args.span, rate=args.rate,
         reporter=reporting.ConsoleReporter(),
@@ -278,9 +337,29 @@ def cmd_calibrate(args, cfg, cfg_path) -> int:
     return 0
 
 
+def cmd_traits(args, cfg, cfg_path) -> int:
+    """List traits, or sample footage to check one is actually reliable.
+
+    The sampling half exists because a trait is only as good as its threshold,
+    and no threshold is trustworthy until it has been run against real footage.
+    ``--dump`` writes every crop it judged to disk so the verdicts can be
+    checked by eye rather than taken on faith.
+    """
+    reporting.banner("traits", cfg_path)
+    if not args.video:
+        reporting.trait_list(traits_mod.REGISTRY.values())
+        return 0
+    from killcutter import traitcheck
+    report = traitcheck.sample(args.video, traits_mod.get(args.trait),
+                               start=args.start, span=args.span, rate=args.rate,
+                               dump_dir=args.dump)
+    reporting.trait_report(report)
+    return 0
+
+
 _COMMANDS = {"detect": cmd_detect, "export": cmd_export,
              "calibrate": cmd_calibrate, "diagnose": cmd_diagnose,
-             "doctor": cmd_doctor}
+             "doctor": cmd_doctor, "traits": cmd_traits}
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────────

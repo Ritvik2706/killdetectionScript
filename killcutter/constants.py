@@ -52,6 +52,20 @@ DEFAULT_REGION = (1598, 186, 189, 45)
 BANNER_SLOT_PITCH = 95
 BANNER_SLOT_HEIGHT = 84
 
+# ── "ELIMINATED: <name>" line — bottom-centre, 1920x1080. (x, y, w, h) ─────────
+# A separate strip from the banner, and the only place the game prints the
+# victim's Activision "#<id>" suffix — the one thing that tells a real player
+# from a bot (see killcutter.traits). Left-anchored: the label starts at a fixed
+# x and the name runs rightwards, so the width just has to outlast a long name.
+# It stops short of the health bar, which shares this row further right.
+ELIMINATED_REGION = (816, 854, 560, 38)
+
+# The victim's name is drawn in saturated red while "ELIMINATED:" beside it is
+# white, so masking on redness isolates the name (and its "#" suffix) from both
+# the label and the game world behind it.
+NAME_RED_MIN = 110       # red channel floor
+NAME_RED_MARGIN = 55     # how far red must lead green and blue
+
 # ── Cheap per-frame trigger ─────────────────────────────────────────────────────
 # Two pixel reads gate the expensive OCR call.
 #

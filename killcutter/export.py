@@ -8,18 +8,24 @@ import os
 import re
 from dataclasses import dataclass
 
-from killcutter import video, outputs
+from killcutter import traits as traits_mod, video, outputs
 from killcutter.errors import VideoError
 from killcutter.models import Clip
 from killcutter.timecode import drift_seconds, resolve_fps, seconds_to_timecode
 
 
 def read_timestamps(path) -> list:
-    """Parse a ``timestamps.txt`` (``start end name...`` per line) into clips."""
+    """Parse a ``timestamps.txt`` into clips.
+
+    Each line is ``start end name...``, optionally followed by a
+    ``[trait=yes, ...]`` suffix. Files written before traits existed have no
+    suffix and load unchanged.
+    """
     clips = []
     with open(path, encoding="utf-8") as f:
         for line in f:
-            parts = line.strip().split()
+            body, tags = traits_mod.decode(line.strip())
+            parts = body.split()
             if len(parts) < 2:
                 continue
             try:
@@ -27,8 +33,18 @@ def read_timestamps(path) -> list:
             except ValueError:
                 continue
             name = " ".join(parts[2:]) if len(parts) >= 3 else "???"
-            clips.append(Clip(start, end, name))
+            clips.append(Clip(start, end, name, tags))
     return clips
+
+
+def format_timestamps(clips) -> str:
+    """Render clips as a ``timestamps.txt`` body.
+
+    One place, so every writer (CLI and desktop app) emits the trait suffix and
+    :func:`read_timestamps` can always read back what was written.
+    """
+    return "".join(f"{c.start:.3f} {c.end:.3f} {c.name}"
+                   f"{traits_mod.encode(getattr(c, 'traits', None))}\n" for c in clips)
 
 
 @dataclass

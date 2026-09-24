@@ -45,6 +45,12 @@ rate        = 4          # frame samples per second; higher = tighter cut timing
                          # and costs little, since every frame is decoded anyway
 export      = true       # auto-run the highlight exporter when detection ends
 
+# Trait filters (see 'killcutter traits' for the list). Names are the same ones
+# --require / --exclude take, so 'exclude = ["bot"]' keeps real-player kills only.
+require      = []
+exclude      = []
+drop_unknown = false     # true also drops kills whose trait could not be read
+
 # The banner region is scaled automatically from the 1920x1080 reference, so
 # 1440p/4K/ultrawide work without changing anything. Set this only if you have
 # measured your own with 'killcutter calibrate'.

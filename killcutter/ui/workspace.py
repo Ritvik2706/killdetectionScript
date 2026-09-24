@@ -53,6 +53,30 @@ def stamp(seconds):
     return f"{int(hours):02}:{int(minutes):02}:{secs:06.3f}".rstrip("0").rstrip(".")
 
 
+# The trait filter as three plain choices, rather than making someone spell out
+# --require/--exclude in a menu. "Keep unknown" stays implicit: the CLI default
+# never drops a kill it was merely unsure about.
+# Marker for a setting stored as a list of trait names but edited as on/off.
+TOGGLE_LIST = object()
+
+KILL_FILTERS = [
+    ("All kills", [], []),
+    ("Real players only · skip bots", [], ["bot"]),
+    ("Bots only", ["bot"], []),
+]
+
+
+def filter_index(require, exclude) -> int:
+    for i, (_, req, exc) in enumerate(KILL_FILTERS):
+        if sorted(req) == sorted(require or []) and sorted(exc) == sorted(exclude or []):
+            return i
+    return 0
+
+
+def filter_label(require, exclude) -> str:
+    return KILL_FILTERS[filter_index(require, exclude)][0]
+
+
 _FIELDS = [
     ("detect", "clips_dir", "Recordings folder", "", str),
     ("detect", "timestamps_dir", "Timestamps folder", "", str),
@@ -66,6 +90,7 @@ _FIELDS = [
     ("detect", "rate", "Samples per second · up to 60", 4,
      lambda raw: number(raw, positive=True, maximum=60)),
     ("detect", "export", "Automatically export EDL", True, bool),
+    ("detect", "exclude", "Skip bot kills by default", [], TOGGLE_LIST),
     ("export", "name", "Premiere sequence name", "Kill Highlights", str),
     ("ui", "color", "Terminal color", True, bool),
 ]
@@ -81,7 +106,8 @@ def settings(cfg, cfg_path=None):
         for section, key, label, default, convert in _FIELDS:
             value = config.section(draft, section).get(key, default)
             empty = "Auto-detect" if key == "clips_dir" else "Current directory"
-            display = ("On" if value else "Off") if convert is bool else (value or empty)
+            toggle = convert is bool or convert is TOGGLE_LIST
+            display = ("On" if value else "Off") if toggle else (value or empty)
             rows.append(f"{label}   {display}")
         action = choose(f"SETTINGS · {target}", rows + [
             "Save settings", "Reset editable settings to defaults", "Discard and go back"], cursor)
@@ -107,8 +133,13 @@ def settings(cfg, cfg_path=None):
         else:
             section, key, label, default, convert = _FIELDS[action]
             value = config.section(draft, section).get(key, default)
-            draft.setdefault(section, {})[key] = (not value if convert is bool else
-                                                  ask(label, value, convert))
+            if convert is TOGGLE_LIST:
+                # Stored as a trait-name list so the CLI reads it directly;
+                # presented as a plain on/off, since that is the whole choice.
+                draft.setdefault(section, {})[key] = [] if value else ["bot"]
+            else:
+                draft.setdefault(section, {})[key] = (not value if convert is bool else
+                                                      ask(label, value, convert))
 
 
 def scan_setup(args, cfg):
@@ -145,6 +176,7 @@ def scan_setup(args, cfg):
             ("full", f"Use full recording   {stamp(duration)}"),
             ("padding", f"Lead-in / tail   {args.offset:g}s / {args.end_offset:g}s"),
             ("rate", f"Sampling   {args.rate:g} per second"),
+            ("kill_filter", f"Kill filter   {filter_label(args.require, args.exclude)}"),
             ("timestamps", f"Timestamps output   {args.output}"),
             ("export", f"Export EDL   {'Off' if args.no_export else 'On'}"),
             ("dry_run", f"Dry run   {'On' if args.dry_run else 'Off'}"),
@@ -172,6 +204,10 @@ def scan_setup(args, cfg):
                 ui.kv("Timestamps", "Dry run (no files)" if args.dry_run else args.output),
                 ui.kv("EDL", "Off" if args.no_export or args.dry_run else args.edl_output),
                 ui.kv("MP4 clips", args.clips_output_dir if args.render_clips and not args.dry_run else "Off"),
+                ui.kv("Kill filter", filter_label(args.require, args.exclude)
+                      + ("" if not (args.require or args.exclude)
+                         else "   ·   undetermined kills are "
+                              + ("dropped" if args.drop_unknown else "kept"))),
                 "Highlights stay inside the selected range; times refer to the source.",
             ]
             if action == "summary":
@@ -212,6 +248,17 @@ def scan_setup(args, cfg):
             args.no_export = not args.no_export
         elif action == "dry_run":
             args.dry_run = not args.dry_run
+        elif action == "kill_filter":
+            pick = choose("KILL FILTER", [label for label, _, _ in KILL_FILTERS]
+                          + ["Also drop kills the filter could not determine   "
+                             f"{'On' if args.drop_unknown else 'Off'}"],
+                          filter_index(args.require, args.exclude))
+            if pick is not None:
+                if pick == len(KILL_FILTERS):
+                    args.drop_unknown = not args.drop_unknown
+                else:
+                    _, args.require, args.exclude = KILL_FILTERS[pick]
+                    args.require, args.exclude = list(args.require), list(args.exclude)
         elif action == "preview":
             args.preview = not args.preview
         elif action == "edl":

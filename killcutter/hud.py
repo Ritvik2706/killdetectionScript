@@ -30,6 +30,7 @@ class Hud:
     """Resolved banner geometry for one frame size."""
 
     region: tuple          # (x, y, w, h) of the text block we OCR
+    eliminated: tuple      # (x, y, w, h) of the bottom-centre ELIMINATED line
     white: tuple           # (x, y) bright pixel on the banner icon
     accent: tuple          # (x, y) on the left accent bar
     slot_pitch: int        # vertical distance between stacked banners
@@ -60,8 +61,15 @@ def for_size(width: int, height: int, region_override=None) -> Hud:
     region = (tuple(region_override) if region_override
               else (x_from_right(rx), scaled(ry), scaled(rw), scaled(rh)))
 
+    # The ELIMINATED line sits near the centre of the screen rather than against
+    # an edge, so it scales from the left like the picture does.
+    ex, ey, ew, eh = constants.ELIMINATED_REGION
+    eliminated = (int(round(ex * width / REFERENCE_WIDTH)),
+                  scaled(ey), int(round(ew * width / REFERENCE_WIDTH)), scaled(eh))
+
     return Hud(
         region=region,
+        eliminated=eliminated,
         white=(x_from_right(constants.TRIGGER_PIXEL_WHITE[0]),
                scaled(constants.TRIGGER_PIXEL_WHITE[1])),
         accent=(x_from_right(constants.TRIGGER_PIXEL_ACCENT[0]),

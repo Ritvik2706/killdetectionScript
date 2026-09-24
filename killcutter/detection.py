@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import cv2
 import pytesseract
 
-from killcutter import constants, hud as hud_mod
+from killcutter import constants, hud as hud_mod, traits as traits_mod
 from killcutter.errors import ConfigError, DependencyError, VideoError
 from killcutter.models import Clip
 from killcutter.ranges import resolve_range
@@ -39,6 +39,7 @@ class DetectionSettings:
     rate: float = 2.0            # frame samples per second
     preview: bool = False
     debug: bool = False
+    traits: bool = True          # record per-kill traits (see killcutter.traits)
 
 
 def validate(settings: DetectionSettings) -> None:
@@ -212,6 +213,43 @@ def _merge_names(prev_name: str, new_name: str) -> str:
     return f"{prev_name} + {new_name}"
 
 
+# ── Trait observation ───────────────────────────────────────────────────────────
+
+def _observe(pending, frame, hud) -> None:
+    """Run every registered trait probe for the clips still inside their window.
+
+    Called on every sampled frame, not just triggered ones: the evidence a trait
+    looks for (the ELIMINATED line, say) usually shows up *after* the banner
+    that got us here, and often when no banner is up at all.
+    """
+    if not pending:
+        return
+    crops = {}
+    for observation in pending:
+        for trait in traits_mod.REGISTRY.values():
+            box = crops.get(trait.region)
+            if box is None:
+                box = crops[trait.region] = _crop(frame, getattr(hud, trait.region))
+            observation.note(trait.name, trait.probe(box, hud.scale))
+
+
+def _crop(frame, box):
+    """Clamp ``box`` to the frame and return that view (possibly empty)."""
+    x, y, w, h = box
+    fh, fw = frame.shape[:2]
+    return frame[min(y, fh):min(y + h, fh), min(x, fw):min(x + w, fw)]
+
+
+def _retire(pending, clips, elapsed, *, force=False) -> None:
+    """Write resolved traits onto their clips once their window has passed."""
+    for observation in list(pending):
+        if force or elapsed >= observation.until:
+            if observation.clip_index < len(clips):
+                clip = clips[observation.clip_index]
+                clip.traits = traits_mod.merge(clip.traits, observation.resolve())
+            pending.remove(observation)
+
+
 # ── Duration ────────────────────────────────────────────────────────────────────
 
 def _measure_duration(cap, total_frames, fps) -> float:
@@ -318,6 +356,7 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
     last_name = ""      # player from the last counted kill, for re-read detection
     banner_cleared = True   # has the banner gone away since that kill?
     player = ""   # most recent OCR result — shown in preview during cooldown frames
+    pending: list = []   # trait evidence still being gathered, per clip
     start_wall = time.time()
     done = 0
     completed = True
@@ -333,6 +372,9 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
             if elapsed >= scan_end:
                 break
             done += 1
+            if settings.traits:
+                _observe(pending, frame, hud)
+                _retire(pending, clips, elapsed)
             triggered = _banner_visible(frame, hud)
             reporter.frame(elapsed, triggered)
 
@@ -369,12 +411,15 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
                         if clips and (elapsed - last_kill) <= settings.merge_gap:
                             prev = clips[-1]
                             clips[-1] = Clip(prev.start, cut_end,
-                                             _merge_names(prev.name, name))
+                                             _merge_names(prev.name, name),
+                                             dict(prev.traits))
                             reporter.extended(clips[-1])
                         else:
                             clips.append(
                                 Clip(max(start, kill_at - settings.offset), cut_end, name))
                             reporter.kill(len(clips), kill_at, clips[-1])
+                        if settings.traits:
+                            _open_window(pending, len(clips) - 1, elapsed)
                         last_kill = elapsed
                         last_name = name
                         banner_cleared = False
@@ -394,6 +439,9 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
         if settings.preview:
             cv2.destroyAllWindows()
 
+    # Windows still open when the scan ended (or was interrupted) resolve on
+    # whatever evidence they did gather, rather than being thrown away.
+    _retire(pending, clips, 0.0, force=True)
     return clips, completed
 
 
@@ -404,3 +452,13 @@ def _preview(roi, player) -> bool:
                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     cv2.imshow("Banner region", display)
     return cv2.waitKey(1) & 0xFF == ord("q")
+
+
+def _open_window(pending, clip_index, elapsed) -> None:
+    """Start (or extend) the trait-evidence window for ``clip_index``."""
+    for observation in pending:
+        if observation.clip_index == clip_index:
+            observation.until = elapsed + traits_mod.WINDOW_SECONDS
+            return
+    pending.append(traits_mod.Observation(
+        clip_index=clip_index, until=elapsed + traits_mod.WINDOW_SECONDS))

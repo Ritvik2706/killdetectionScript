@@ -493,7 +493,7 @@ class Application(Views, tk.Tk):
         if not clips:
             return
         self.clipboard_clear()
-        self.clipboard_append(''.join(f'{c.start:.3f} {c.end:.3f} {c.name}\n' for c in clips))
+        self.clipboard_append(export.format_timestamps(clips))
         self.status.set(f'Copied {len(clips)} highlight timestamps to the clipboard.')
 
     def describe_live(self, event=None):
@@ -546,7 +546,7 @@ class Application(Views, tk.Tk):
                     plan = export.plan(media.path, clips, name=sequence, fps_override=fps, output=target)
                     export.write_edl(plan)
                 else:
-                    outputs.atomic_text(target, ''.join(f'{c.start:.3f} {c.end:.3f} {c.name}\n' for c in clips))
+                    outputs.atomic_text(target, export.format_timestamps(clips))
             return target
         self.exporting_ids = set(self.table.selection())
         self._begin('export', 'Exporting selected highlights… MP4 encoding can take a while.')
