@@ -7,7 +7,7 @@ hooks; the rest are one-shot renderers the CLI calls directly. Keeping every
 
 import sys
 
-from killcutter import ui
+from killcutter import traits as traits_mod, ui
 from killcutter.timecode import format_clock, format_duration, format_eta
 
 
@@ -138,29 +138,103 @@ class ConsoleReporter:
 
 # ── One-shot result / export renderers ──────────────────────────────────────────
 
-def detection_results(clips) -> None:
-    """Print the rule + RESULTS panel (or a 'no kills' note)."""
+def detection_results(clips, dropped=(), require=(), exclude=(),
+                      keep_unknown=True) -> None:
+    """Print the rule + RESULTS panel (or a 'no kills' note).
+
+    When trait filters were asked for, every clip is accounted for: the kept
+    ones in RESULTS, the rest in a FILTERED OUT panel beneath, each with its
+    victims and trait verdicts, so nothing disappears without a name.
+    """
+    filtering = bool(require or exclude)
+    # Verdicts are worth showing even unfiltered -- that is how you find out
+    # whether '--exclude bot' would be worth running -- but not a column of
+    # "undetermined" when the scan ran with --no-traits.
+    show_traits = filtering or any(getattr(c, "traits", None) for c in clips)
     print(ui.CLEAR_LINE + ui.rule(ui.DIM))
-    if not clips:
+    if not clips and not dropped:
         print("  " + ui.badge("DONE", bg=ui.AMBER) + " "
               + ui.paint("No kills detected.", ui.WHITE))
         print("  " + ui.paint("Run 'killcutter diagnose' to see which check is failing.",
                               ui.DIM))
         return
 
-    rows = []
-    for idx, clip in enumerate(clips, 1):
-        rows.append(
-            ui.paint(f"#{idx:<3}", ui.TEAL, bold=True) + " "
-            + ui.paint(f"{format_clock(clip.start)} – {format_clock(clip.end)}", ui.WHITE)
-            + "  " + ui.paint(f"[{format_clock(clip.duration)}]", ui.AMBER)
-            + "  " + ui.paint(clip.name, ui.GREY)
-        )
-    total = sum(c.duration for c in clips)
-    summary = (ui.paint(f"{len(clips)} clip{'s' if len(clips) != 1 else ''} detected",
-                        ui.GREEN, bold=True)
-               + ui.paint(f"   ·   total footage {format_clock(total)}", ui.GREY))
-    print(ui.panel([summary, ""] + rows, title="RESULTS", color=ui.GREEN))
+    if clips:
+        total = sum(c.duration for c in clips)
+        summary = (ui.paint(f"{len(clips)} clip{'s' if len(clips) != 1 else ''} "
+                            + ("kept" if filtering else "detected"), ui.GREEN, bold=True)
+                   + ui.paint(f"   ·   total footage {format_clock(total)}", ui.GREY))
+        rows = [summary]
+        if filtering:
+            rows.append(_filter_line(clips, dropped, require, exclude, keep_unknown))
+        rows.append("")
+        for idx, clip in enumerate(clips, 1):
+            rows += _clip_rows(clip, ui.paint(f"#{idx:<3}", ui.TEAL, bold=True),
+                               show_traits=show_traits)
+        print(ui.panel(rows, title="RESULTS", color=ui.GREEN))
+    else:
+        print("  " + ui.badge("DONE", fg=ui.INK, bg=ui.AMBER) + " "
+              + ui.paint(f"Every one of the {len(dropped)} detected clips was "
+                         "filtered out.", ui.WHITE))
+    if filtering:
+        _filtered_panel(dropped, require, exclude, keep_unknown)
+
+
+def _filter_line(kept, dropped, require, exclude, keep_unknown) -> str:
+    """One line saying which filter ran and what it did."""
+    unknown = sum(1 for c in kept if any(v is None for _, v in traits_mod.describe(c)))
+    line = (ui.paint("filter ", ui.GREY) + ui.paint(_filter_label(require, exclude), ui.WHITE)
+            + ui.paint(f"   ·   {len(dropped)} filtered out", ui.AMBER if dropped else ui.GREY))
+    if unknown and keep_unknown:
+        line += ui.paint(f"   ·   {unknown} undetermined, kept", ui.AMBER)
+    return line
+
+
+def _filter_label(require, exclude) -> str:
+    return ", ".join([f"require {t}" for t in require] + [f"exclude {t}" for t in exclude])
+
+
+def _clip_rows(clip, lead, *, show_traits=True, muted=False) -> list:
+    """Rows for one clip: times and verdicts, then one victim per line.
+
+    Merged clips hold several kills ("A + B + C"); listing them one under
+    another keeps every name visible instead of truncating at the panel edge.
+    """
+    head = (lead + " "
+            + ui.paint(f"{format_clock(clip.start)} – {format_clock(clip.end)}",
+                       ui.GREY if muted else ui.WHITE)
+            + "  " + ui.paint(f"[{format_clock(clip.duration)}]",
+                              ui.DIM if muted else ui.AMBER))
+    if show_traits:
+        for label, value in traits_mod.describe(clip):
+            colour = ui.AMBER if value is None else (ui.GREEN if value else ui.RED)
+            head += "  " + ui.paint(label, colour, bold=value is not None)
+    rows = [head]
+    indent = " " * (ui.visible_len(lead) + 3)
+    names = [n for n in clip.name.split(" + ") if n] or ["???"]
+    for name in names:
+        rows.append(indent + ui.paint("› ", ui.DIM)
+                    + ui.paint(name, ui.GREY if muted else ui.WHITE))
+    return rows
+
+
+def _filtered_panel(dropped, require, exclude, keep_unknown) -> None:
+    """The clips the trait filters removed, each with its victims and verdicts."""
+    title = f"FILTERED OUT · {_filter_label(require, exclude)}"
+    if not dropped:
+        rows = [ui.paint("Nothing was filtered out — every clip passed.", ui.GREY)]
+    else:
+        n = len(dropped)
+        rows = [ui.paint(f"{n} clip{'s' if n != 1 else ''} left out of the reel",
+                         ui.AMBER, bold=True), ""]
+        for clip in dropped:
+            rows += _clip_rows(clip, ui.paint("✕   ", ui.RED, bold=True), muted=True)
+    rows.append("")
+    rows.append(ui.paint("Undetermined kills were " + ("kept; pass --drop-unknown to "
+                                                      "remove those too." if keep_unknown
+                                                      else "dropped (--drop-unknown)."),
+                         ui.DIM))
+    print(ui.panel(rows, title=title, color=ui.AMBER))
 
 
 def timestamps_saved(path) -> None:
@@ -372,20 +446,7 @@ def trait_list(traits) -> None:
 
 def traits_filtered(dropped, require, exclude, keep_unknown) -> None:
     """Say what the trait filters removed, and why, so it is never silent."""
-    asked = ", ".join([f"require {t}" for t in require]
-                      + [f"exclude {t}" for t in exclude])
-    n = len(dropped)
-    print("  " + ui.badge("FILTERED", fg=ui.INK, bg=ui.AMBER) + " "
-          + ui.paint(f"{n} clip{'s' if n != 1 else ''} dropped  ({asked})", ui.WHITE))
-    if keep_unknown:
-        print("  " + ui.paint("Clips whose traits could not be determined were kept; "
-                              "pass --drop-unknown to remove those too.", ui.DIM))
-    for clip in dropped[:8]:
-        print("    " + ui.paint(f"{format_duration(clip.start)} – "
-                                f"{format_duration(clip.end)}", ui.GREY)
-              + "  " + ui.paint(clip.name, ui.DIM))
-    if n > 8:
-        print("    " + ui.paint(f"… and {n - 8} more", ui.DIM))
+    _filtered_panel(dropped, require, exclude, keep_unknown)
     print()
 
 

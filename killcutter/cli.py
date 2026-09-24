@@ -229,10 +229,8 @@ def cmd_detect(args, cfg, cfg_path) -> int:
 
     clips, dropped = traits_mod.select(clips, args.require, args.exclude,
                                        keep_unknown=not args.drop_unknown)
-    if dropped:
-        reporting.traits_filtered(dropped, args.require, args.exclude,
-                                  keep_unknown=not args.drop_unknown)
-    reporting.detection_results(clips)
+    reporting.detection_results(clips, dropped, args.require, args.exclude,
+                                keep_unknown=not args.drop_unknown)
     if not clips:
         return 0 if completed else 130
     if args.dry_run:
@@ -289,8 +287,7 @@ def _do_export(video_path, timestamps_path, *, name="Kill Highlights", fps=None,
         raise NoClipsError(f"No clips found in {timestamps_path}")
     if require or exclude:
         clips, dropped = traits_mod.select(clips, require, exclude, keep_unknown)
-        if dropped:
-            reporting.traits_filtered(dropped, require, exclude, keep_unknown)
+        reporting.traits_filtered(dropped, require, exclude, keep_unknown)
         if not clips:
             raise NoClipsError(
                 f"Every clip in {timestamps_path} was filtered out by the trait "

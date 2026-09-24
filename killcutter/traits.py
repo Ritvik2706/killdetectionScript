@@ -434,6 +434,26 @@ def matches(clip, require=(), exclude=(), keep_unknown=True) -> bool:
     return True
 
 
+def describe(clip) -> list:
+    """``(label, value)`` per registered trait, for showing a clip's verdicts.
+
+    ``value`` stays tri-state so the caller can colour an unknown differently;
+    a False reads as the negative alias ("bot") when the trait has one.
+    """
+    traits = getattr(clip, "traits", None) or {}
+    out = []
+    for trait in REGISTRY.values():
+        value = traits.get(trait.name)
+        if value is None:
+            label = "undetermined" if len(REGISTRY) == 1 else f"{trait.name} undetermined"
+        elif value:
+            label = trait.name
+        else:
+            label = trait.negative_name or f"not {trait.name}"
+        out.append((label, value))
+    return out
+
+
 def select(clips, require=(), exclude=(), keep_unknown=True):
     """Return ``(kept, dropped)`` for a list of clips."""
     kept, dropped = [], []
