@@ -84,7 +84,14 @@ only for MP4 rendering. Settings → Check environment reports dependencies.
    Ctrl/Shift to change the selection, double-click to seek to a clip, or export
    selected rows as timestamps, a Premiere EDL, or H.264/AAC MP4 clips.
    Search player names with Ctrl+F, click column headings to sort, and use
-   **Copy** for clipboard timestamps. Selection stays tied to the same clips
+   **Copy** for clipboard timestamps. Filter by **All kills**, **Real players**,
+   **Bots**, or **Undetermined**; the sortable **Kill type** column shows each
+   verdict. Real-player and bot filters include undetermined kills by default;
+   uncheck **Include undetermined kills** for confirmed matches only. A merged
+   clip counts as real player if any kill is confirmed. Filters combine with
+   player search without rescanning or deleting clips. **Reset filters** shows
+   everything again. Hidden rows are deselected and cannot be exported.
+   Selection stays tied to the same clips
    when sorting. Select all applies to the visible search results; exports remain
    in chronological order. The selection summary shows count and total duration.
    **Rename…** (F2) relabels a detection whose OCR name came out wrong, **Remove**

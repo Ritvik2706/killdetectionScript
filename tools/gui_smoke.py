@@ -66,6 +66,20 @@ def main():
         app.show('results')
         app.table.selection_set('0')
         capture(app, folder / 'highlights.png')
+        app.state.clips = [Clip(.2, 1, 'Rival One', {'real-player': True}),
+                           Clip(1, 2, 'Bot encounter', {'real-player': False}),
+                           Clip(2, 2.8, 'Unclassified encounter')]
+        app.filter_results()
+        app.kill_filter.set('real-player')
+        app.select_all_results()
+        capture(app, folder / 'kill-filters.png')
+        app.geometry('980x680+30+30')
+        capture(app, folder / 'kill-filters-compact.png')
+        assert app.table.winfo_height() > 60
+        app.reset_result_filters()
+        app.state.clips = [Clip(.5, 2.5, 'Player One, Player Two')]
+        app.filter_results()
+
         app.show('workspace')
         app.geometry('980x680+30+30')
         capture(app, folder / 'compact.png')

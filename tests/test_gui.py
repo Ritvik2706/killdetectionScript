@@ -195,7 +195,7 @@ def test_gui_live_merge_search_sort_and_copy(app):
     assert app.working == 'scan'
     assert app.live_table.item('0', 'values') == ('Alpha, Beta',)
     assert len(app.live_table.get_children()) == 2
-    assert app.table.item('0', 'values')[2] == '00:00:23.000'
+    assert app.table.set('0', 'out') == '00:00:23.000'
     app.working = None
     app.search_var.set('BETA')
     assert app.table.get_children() == ('0',)
@@ -332,3 +332,32 @@ def test_gui_recent_recordings_menu(app, tmp_path):
     assert str(menu.entrycget(1, 'state')) == 'disabled'
     app.clear_recents()
     assert app.recent_menu().entrycget(0, 'label') == 'No recent recordings yet'
+
+
+def test_gui_kill_filters_preserve_clips_and_limit_selection(app):
+    app.state.clips = [Clip(1, 3, 'Alpha', {'real-player': True}),
+                       Clip(4, 6, 'Beta', {'real-player': False}),
+                       Clip(7, 9, 'Gamma')]
+    app.filter_results()
+    app.select_all_results()
+    app.kill_filter.set('real-player')
+    assert app.table.get_children() == ('0', '2')
+    assert set(app.table.selection()) == {'0', '2'}
+    app.keep_unknown.set(False)
+    assert app.table.get_children() == ('0',)
+    app.kill_filter.set('bot')
+    assert app.table.get_children() == ('1',)
+    assert not app.table.selection()
+    app.keep_unknown.set(True)
+    assert app.table.get_children() == ('1', '2')
+    app.kill_filter.set('unknown')
+    assert app.table.get_children() == ('2',)
+    assert app.table.set('2', 'type') == 'Undetermined'
+    app.search_var.set('Alpha')
+    assert not app.table.get_children()
+    assert 'No matching' in app.filter_hint.get()
+    app.reset_result_filters()
+    assert app.table.get_children() == ('0', '1', '2')
+    assert len(app.state.clips) == 3
+    app.sort_results('type')
+    assert app.table.get_children() == ('1', '0', '2')

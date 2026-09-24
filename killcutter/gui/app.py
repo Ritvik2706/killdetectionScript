@@ -7,7 +7,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from killcutter import config, constants, detection, environment, export, outputs
+from killcutter import config, constants, detection, environment, export, outputs, traits
 from killcutter.ranges import parse_timestamp, resolve_range
 from . import preferences, theme as t
 from .services import Jobs, analyze, open_media
@@ -53,6 +53,9 @@ class Application(Views, tk.Tk):
         self.live_detail = tk.StringVar(value='Player names and moments appear here as they are detected.')
         self.follow_scan = tk.BooleanVar(value=True)
         self.search_var = tk.StringVar()
+        self.kill_filter = tk.StringVar(value='all')
+        self.keep_unknown = tk.BooleanVar(value=True)
+        self.filter_hint = tk.StringVar(value='Filter highlights without rescanning. Only selected rows are exported.')
         self.selected_var = tk.StringVar(value='No highlights selected')
         self.result_sort = ('in', False)
         self.removed = []
@@ -78,7 +81,8 @@ class Application(Views, tk.Tk):
         self.show(self.prefs.page)
         self.start_var.trace_add('write', lambda *_: self._range_summary())
         self.end_var.trace_add('write', lambda *_: self._range_summary())
-        self.search_var.trace_add('write', lambda *_: self.filter_results())
+        for variable in (self.search_var, self.kill_filter, self.keep_unknown):
+            variable.trace_add('write', lambda *_: self.filter_results())
         self.bind('<Control-o>', lambda _: self.open_file())
         self.bind('<Control-Return>', lambda _: self.start_scan())
         self.bind('<Control-f>', self.focus_search)
@@ -237,7 +241,7 @@ class Application(Views, tk.Tk):
         self.save_sample_button.state(['!disabled'] if self.sample and not busy else ['disabled'])
         self.copy_pixel_button.state(['!disabled'] if self.pixel_hex and not busy else ['disabled'])
         selected = [self.state.clips[int(i)] for i in self.table.selection() if int(i) < len(self.state.clips)]
-        self.selected_var.set(f'{len(self.table.get_children())} shown · {len(selected)} selected  ·  {clock(sum(c.duration for c in selected))} total duration')
+        self.selected_var.set(f'{len(self.table.get_children())} of {len(self.state.clips)} shown · {len(selected)} selected  ·  {clock(sum(c.duration for c in selected))} total duration')
         for index, button in enumerate(self.result_buttons):
             has_rows = bool(self.table.get_children() if index == 0 else self.table.selection())
             button.state(['!disabled'] if has_rows and not busy else ['disabled'])
@@ -463,27 +467,48 @@ class Application(Views, tk.Tk):
         self.table.selection_set(self.table.get_children())
         return 'break'
 
+    def reset_result_filters(self):
+        self.search_var.set('')
+        self.kill_filter.set('all')
+        self.keep_unknown.set(True)
+
+    @staticmethod
+    def kill_type(clip):
+        return {True: 'Real player', False: 'Bot', None: 'Undetermined'}[clip.traits.get('real-player')]
+
     def filter_results(self):
         selected = set(self.table.selection())
         self.table.delete(*self.table.get_children())
         query = self.search_var.get().strip().casefold()
+        mode = self.kill_filter.get()
+        for key, button in self.filter_buttons.items():
+            button.state(['selected'] if key == mode else ['!selected'])
+        self.unknown_check.state(['!disabled'] if mode in ('real-player', 'bot') else ['disabled'])
         column, reverse = self.result_sort
-        keys = {'player': lambda pair: pair[1].name.casefold(), 'in': lambda pair: pair[1].start,
+        keys = {'type': lambda pair: self.kill_type(pair[1]), 'player': lambda pair: pair[1].name.casefold(), 'in': lambda pair: pair[1].start,
                 'out': lambda pair: pair[1].end, 'duration': lambda pair: pair[1].duration}
-        for row, (i, clip) in enumerate(sorted(enumerate(self.state.clips), key=keys[column], reverse=reverse)):
+        row = 0
+        for i, clip in sorted(enumerate(self.state.clips), key=keys[column], reverse=reverse):
             if query and query not in clip.name.casefold():
                 continue
+            if mode == 'unknown' and clip.traits.get('real-player') is not None:
+                continue
+            if mode in ('real-player', 'bot') and not traits.matches(clip, require=(mode,), keep_unknown=self.keep_unknown.get()):
+                continue
             self.table.insert('', 'end', iid=str(i),
-                              values=(clip.name, clock(clip.start), clock(clip.end), f'{clip.duration:.2f}s'),
+                              values=(clip.name, self.kill_type(clip), clock(clip.start), clock(clip.end), f'{clip.duration:.2f}s'),
                               tags=('alternate',) if row % 2 else ())
+            row += 1
             if str(i) in selected:
                 self.table.selection_add(str(i))
+        self.filter_hint.set('No matching highlights. Try another filter or reset filters.' if self.state.clips and not row
+                             else 'Undetermined = insufficient evidence. Mixed clips count as real player if any kill is confirmed.')
         self._update_controls()
 
     def sort_results(self, column):
         previous, descending = self.result_sort
         self.result_sort = (column, not descending if column == previous else False)
-        for name, title in [('player', 'PLAYER / MOMENT'), ('in', 'IN'), ('out', 'OUT'), ('duration', 'DURATION')]:
+        for name, title in [('player', 'PLAYER / MOMENT'), ('type', 'KILL TYPE'), ('in', 'IN'), ('out', 'OUT'), ('duration', 'DURATION')]:
             arrow = (' ↓' if self.result_sort[1] else ' ↑') if name == column else ''
             self.table.heading(name, text=title + arrow)
         self.filter_results()
@@ -504,7 +529,7 @@ class Application(Views, tk.Tk):
     def preview_live(self, event=None):
         selection = self.live_table.selection()
         if selection and not self.working:
-            self.search_var.set('')
+            self.reset_result_filters()
             self.table.selection_set(selection[0])
             self.preview_result()
 

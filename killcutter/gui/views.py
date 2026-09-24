@@ -105,6 +105,22 @@ class Views:
         self.search_entry = ttk.Entry(search, textvariable=self.search_var)
         self.search_entry.pack(side='left', fill='x', expand=True)
         ttk.Button(search, text='Clear', command=lambda: self.search_var.set('')).pack(side='left', padx=(8, 0))
+        filters = tk.Frame(bar.content, bg=t.CARD)
+        filters.pack(fill='x', pady=(12, 0))
+        self.filter_buttons = {}
+        for key, title in [('all', 'All kills'), ('real-player', 'Real players'),
+                           ('bot', 'Bots'), ('unknown', 'Undetermined')]:
+            button = ttk.Button(filters, text=title, command=lambda k=key: self.kill_filter.set(k))
+            button.pack(side='left', padx=(0, 6))
+            self.filter_buttons[key] = button
+        self.filter_buttons['all'].state(['selected'])
+        ttk.Button(filters, text='Reset filters', command=self.reset_result_filters).pack(side='right')
+        self.unknown_check = ttk.Checkbutton(bar.content, text='Include undetermined kills',
+                                            variable=self.keep_unknown)
+        self.unknown_check.pack(anchor='w', pady=(8, 0))
+        self.unknown_check.state(['disabled'])
+        label(bar.content, textvariable=self.filter_hint, size=9, color=t.MUTED,
+              wraplength=720, justify='left').pack(anchor='w', pady=(4, 0))
         label(bar.content, textvariable=self.selected_var, color=t.MUTED).pack(anchor='w', pady=(10, 0))
         actions = tk.Frame(page, bg=t.BG)
         trim = tk.Frame(page, bg=t.BG)
@@ -112,8 +128,8 @@ class Views:
         actions.pack(side='bottom', fill='x', pady=(14, 0))
         well = Card(page)
         well.pack(fill='both', expand=True)
-        self.table = ttk.Treeview(well.content, columns=('player', 'in', 'out', 'duration'), show='headings', selectmode='extended')
-        for name, title, width in [('player', 'PLAYER / MOMENT', 260), ('in', 'IN', 150), ('out', 'OUT', 150), ('duration', 'DURATION', 100)]:
+        self.table = ttk.Treeview(well.content, columns=('player', 'type', 'in', 'out', 'duration'), show='headings', selectmode='extended')
+        for name, title, width in [('player', 'PLAYER / MOMENT', 210), ('type', 'KILL TYPE', 140), ('in', 'IN', 125), ('out', 'OUT', 125), ('duration', 'DURATION', 100)]:
             self.table.heading(name, text=title, command=lambda c=name: self.sort_results(c))
             self.table.column(name, width=width, minwidth=70, anchor='w', stretch=True)
         scroll = ttk.Scrollbar(well.content, orient='vertical', command=self.table.yview)
@@ -135,8 +151,16 @@ class Views:
                                ('Timestamps', lambda: self.export_selection('timestamps')),
                                ('Export EDL', lambda: self.export_selection('edl')), ('Render MP4', lambda: self.export_selection('mp4'))]:
             button = ttk.Button(actions, text=title, command=command, style='Toolbar.TButton')
-            button.pack(side='left', padx=(0, 8))
             self.result_buttons.append(button)
+        def arrange_actions(event):
+            buttons = self.result_buttons[:8]
+            columns = 8 if sum(b.winfo_reqwidth() + 8 for b in buttons) <= event.width else 4
+            for index, button in enumerate(buttons):
+                button.grid(row=index // columns, column=index % columns,
+                            sticky='ew', padx=(0, 6), pady=(0, 4))
+            for column in range(8):
+                actions.columnconfigure(column, weight=1 if column < columns else 0)
+        actions.bind('<Configure>', arrange_actions)
         label(trim, 'NUDGE SELECTED', size=9, color=t.MUTED, bold=True).pack(side='left', padx=(0, 10))
         for title, seconds, edge in [('In −1s', -1, 'start'), ('In +1s', 1, 'start'),
                                      ('Out −1s', -1, 'end'), ('Out +1s', 1, 'end')]:
