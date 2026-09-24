@@ -1,4 +1,5 @@
 """Desktop shell and workflows. All widget access stays on the Tk thread."""
+from dataclasses import replace
 from pathlib import Path
 from queue import Empty
 import json
@@ -8,10 +9,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from killcutter import config, constants, detection, environment, export, outputs
 from killcutter.ranges import parse_timestamp, resolve_range
-from . import theme as t
+from . import preferences, theme as t
 from .services import Jobs, analyze, open_media
 from .state import Workspace
-from .widgets import Card, label
+from .widgets import Card, Preview, label
 from .views import Views
 
 
@@ -26,13 +27,15 @@ class Application(Views, tk.Tk):
         super().__init__()
         self.withdraw()
         self.title('Killcutter Studio')
-        self.configure(bg=t.BG)
-        self.family = t.apply(self)
-        self.minsize(980, 680)
-        width, height = min(1360, self.winfo_screenwidth()-60), min(880, self.winfo_screenheight()-80)
-        self.geometry(f'{max(980, width)}x{max(680, height)}')
         self.cfg, loaded_path = config.load(config_path)
         self.config_path = loaded_path or config_path or config.user_config_path()
+        self.prefs = preferences.load(self.cfg)
+        t.configure(*self.prefs.appearance)
+        self.configure(bg=t.BG)
+        self.family = t.apply(self)
+        self.minsize(t.px(940), t.px(660))
+        width, height = min(t.px(1360), self.winfo_screenwidth()-60), min(t.px(880), self.winfo_screenheight()-80)
+        self.geometry(self.prefs.geometry or f'{max(t.px(940), width)}x{max(t.px(660), height)}')
         self.state = Workspace()
         self.jobs = Jobs()
         self.working = None
@@ -40,6 +43,7 @@ class Application(Views, tk.Tk):
         self.seek_timer = None
         self.frame_time = 0
         self.sample = None
+        self.pixel_hex = None
         self.exported = True
         self.exported_ids = set()
         self.exporting_ids = set()
@@ -51,6 +55,11 @@ class Application(Views, tk.Tk):
         self.search_var = tk.StringVar()
         self.selected_var = tk.StringVar(value='No highlights selected')
         self.result_sort = ('in', False)
+        self.removed = []
+        self.theme_var = tk.StringVar(value=self.prefs.theme)
+        self.accent_var = tk.StringVar(value=self.prefs.accent)
+        self.scale_var = tk.DoubleVar(value=self.prefs.scale)
+        self.chime_var = tk.BooleanVar(value=self.prefs.chime)
         self.last_follow = 0
         self.scan_started = 0
         self.scan_position = 0
@@ -66,7 +75,7 @@ class Application(Views, tk.Tk):
         self._build_inspector()
         self._build_settings()
         self.saved_values = {key: variable.get() for key, variable in self.setting_vars.items()}
-        self.show('workspace')
+        self.show(self.prefs.page)
         self.start_var.trace_add('write', lambda *_: self._range_summary())
         self.end_var.trace_add('write', lambda *_: self._range_summary())
         self.search_var.trace_add('write', lambda *_: self.filter_results())
@@ -74,6 +83,9 @@ class Application(Views, tk.Tk):
         self.bind('<Control-Return>', lambda _: self.start_scan())
         self.bind('<Control-f>', self.focus_search)
         self.bind('<Escape>', lambda _: self.stop_scan() if self.working == 'scan' else None)
+        self.bind('<F1>', lambda _: self.show_shortcuts())
+        self.bind('<Control-question>', lambda _: self.show_shortcuts())
+        self.bind('<Control-z>', lambda _: self.undo_remove())
         for number, page in enumerate(('workspace', 'results', 'inspector', 'settings'), 1):
             self.bind(f'<Control-Key-{number}>', lambda _, p=page: self.show(p))
         self.protocol('WM_DELETE_WINDOW', self.close)
@@ -82,14 +94,14 @@ class Application(Views, tk.Tk):
         self.deiconify()
 
     def _build_shell(self):
-        rail_card = Card(self, padding=8, color=t.SIDEBAR, width=206)
+        rail_card = Card(self, padding=8, role='SIDEBAR', width=t.px(214))
         rail_card.pack(side='left', fill='y', padx=(12, 0), pady=12)
         rail_card.pack_propagate(False)
+        self.rail_card = rail_card
         rail = rail_card.content
-        brand = tk.Canvas(rail, width=42, height=42, bg=t.SIDEBAR, highlightthickness=0)
-        brand.pack(anchor='w', padx=22, pady=(26, 12))
-        brand.create_rectangle(2, 2, 40, 40, fill=t.ACCENT, outline='')
-        brand.create_polygon(14, 10, 14, 32, 31, 21, fill='white')
+        self.brand = tk.Canvas(rail, width=t.px(42), height=t.px(42), bg=t.SIDEBAR, highlightthickness=0)
+        self.brand.pack(anchor='w', padx=22, pady=(26, 12))
+        self._draw_brand()
         label(rail, 'Killcutter', size=21, bold=True).pack(anchor='w', padx=22)
         label(rail, 'S T U D I O', size=9, color=t.MUTED).pack(anchor='w', padx=24, pady=(4, 32))
         label(rail, 'WORKSPACE', size=9, color=t.MUTED, bold=True).pack(anchor='w', padx=24, pady=(0, 10))
@@ -100,7 +112,7 @@ class Application(Views, tk.Tk):
             button = ttk.Button(rail, text=title, style='Nav.TButton', command=lambda k=key: self.show(k))
             button.pack(fill='x', padx=2, pady=3)
             self.nav[key] = button
-        label(rail, 'LOCAL PROCESSING\nYour footage stays yours.\n\nCtrl+O  Open recording\nCtrl+Enter  Analyze\nEsc  Stop analysis', size=9, color=t.MUTED,
+        label(rail, 'LOCAL PROCESSING\nYour footage stays yours.\n\nCtrl+O  Open recording\nCtrl+Enter  Analyze\nF1  All shortcuts', size=9, color=t.MUTED,
               justify='left').pack(side='bottom', anchor='w', padx=22, pady=26)
         main = tk.Frame(self, bg=t.BG)
         main.pack(side='left', fill='both', expand=True, padx=26, pady=(22, 14))
@@ -108,6 +120,8 @@ class Application(Views, tk.Tk):
         self.header.pack(fill='x', pady=(0, 22))
         self.open_button = ttk.Button(self.header, text='Open recording   ↗', style='Primary.TButton', command=self.open_file)
         self.open_button.pack(side='right', padx=(16, 0))
+        self.recent_button = ttk.Button(self.header, text='Recent ▾', style='Toolbar.TButton', command=self.show_recents)
+        self.recent_button.pack(side='right')
         self.heading = label(self.header, '', size=26, bold=True)
         self.heading.pack(anchor='w')
         self.subtitle = label(self.header, '', color=t.MUTED)
@@ -123,8 +137,16 @@ class Application(Views, tk.Tk):
         self.status_label.pack(fill='x')
         footer.bind('<Configure>', lambda e: self.status_label.configure(wraplength=max(200, e.width)))
 
+    def _draw_brand(self):
+        unit = t.px(42) / 42
+        self.brand.configure(width=t.px(42), height=t.px(42), bg=t.SIDEBAR)
+        self.brand.delete('all')
+        self.brand.create_rectangle(2*unit, 2*unit, 40*unit, 40*unit, fill=t.ACCENT, outline='')
+        self.brand.create_polygon(14*unit, 10*unit, 14*unit, 32*unit, 31*unit, 21*unit, fill=t.ON_ACCENT)
+
     def _header_resize(self, event):
-        available = max(180, event.width - self.open_button.winfo_reqwidth() - 30)
+        available = max(180, event.width - self.open_button.winfo_reqwidth()
+                        - self.recent_button.winfo_reqwidth() - 30)
         self.heading.configure(wraplength=available, justify='left')
         self.subtitle.configure(wraplength=available, justify='left')
 
@@ -142,6 +164,7 @@ class Application(Views, tk.Tk):
             'settings': ('Make it yours.', 'Saved defaults for your workflow, folders, and detection.'),
         }
         self.current_page = key
+        self.prefs = replace(self.prefs, page=key)
         self.heading.configure(text=titles[key][0])
         self.subtitle.configure(text=titles[key][1])
         self.pages[key].tkraise()
@@ -194,8 +217,11 @@ class Application(Views, tk.Tk):
             self.after_cancel(self.seek_timer)
             self.seek_timer = None
         self.generation += 1
+        resolved = str(Path(path).resolve())
+        self.prefs = preferences.remember(self.prefs, resolved)
+        self._save_preferences()
         self._begin('open', 'Opening recording…')
-        self.jobs.submit('open', open_media, str(Path(path).resolve()))
+        self.jobs.submit('open', open_media, resolved)
 
     def _begin(self, kind, message):
         self.working = kind
@@ -209,6 +235,7 @@ class Application(Views, tk.Tk):
         self.cancel_button.state(['!disabled'] if self.working == 'scan' else ['disabled'])
         self.seek.state(['!disabled'] if loaded and not busy else ['disabled'])
         self.save_sample_button.state(['!disabled'] if self.sample and not busy else ['disabled'])
+        self.copy_pixel_button.state(['!disabled'] if self.pixel_hex and not busy else ['disabled'])
         selected = [self.state.clips[int(i)] for i in self.table.selection() if int(i) < len(self.state.clips)]
         self.selected_var.set(f'{len(self.table.get_children())} shown · {len(selected)} selected  ·  {clock(sum(c.duration for c in selected))} total duration')
         for index, button in enumerate(self.result_buttons):
@@ -305,7 +332,9 @@ class Application(Views, tk.Tk):
         self.inspector.set_image(image)
         self.frame_time = self.state.position
         self.sample = None
+        self.pixel_hex = None
         self.pixel_info.configure(text='No pixel selected')
+        self.pixel_swatch.configure(bg=t.FIELD)
         self._update_controls()
 
     def _poll(self):
@@ -400,6 +429,8 @@ class Application(Views, tk.Tk):
                     self.live_detail.set('Analysis complete. Review and export your highlights.' if self.state.completed else 'Stopped. Your partial results are ready to review.')
                     if self.state.completed:
                         self.progress['value'] = 100
+                    if self.prefs.chime:
+                        self.bell()
                     self.status.set(('Scan finished. Select highlights to export.' if self.state.completed else 'Scan stopped. Partial highlights are ready to export.') if self.state.clips else 'No highlights found in this range. Check the HUD layout or try another section.')
                     self.show('results')
                 elif kind == 'export':
@@ -527,7 +558,9 @@ class Application(Views, tk.Tk):
         self.sample = {'version': 1, 'source': self.state.media.path, 'time_seconds': self.frame_time,
                        'frame_width': self.state.media.width, 'frame_height': self.state.media.height,
                        'x': x, 'y': y, 'rgb': list(rgb)}
-        self.pixel_info.configure(text=f'X {x}   /   Y {y}     ·     RGB {rgb[0]}, {rgb[1]}, {rgb[2]}')
+        self.pixel_hex = '#%02X%02X%02X' % tuple(rgb[:3])
+        self.pixel_info.configure(text=f'X {x}   /   Y {y}     ·     RGB {rgb[0]}, {rgb[1]}, {rgb[2]}     ·     {self.pixel_hex}')
+        self.pixel_swatch.configure(bg=self.pixel_hex)
         self._update_controls()
 
     def save_sample(self):
@@ -567,6 +600,221 @@ class Application(Views, tk.Tk):
         ttk.Button(dialog, text='Done', command=dialog.destroy).pack(pady=(0, 16))
         dialog.bind('<Escape>', lambda _: dialog.destroy())
 
+    # ----- appearance, session and recents -------------------------------
+
+    def _widgets(self, kind, parent=None):
+        """Every descendant of ``parent`` that is an instance of ``kind``."""
+        found = []
+        for child in (parent or self).winfo_children():
+            if isinstance(child, kind):
+                found.append(child)
+            found.extend(self._widgets(kind, child))
+        return found
+
+    def apply_appearance(self, *, persist=True):
+        """Restyle the live window from the appearance controls."""
+        before = t.colors()
+        try:
+            scale = round(float(self.scale_var.get()), 2)
+        except (tk.TclError, ValueError):
+            scale = self.prefs.scale
+        self.prefs = replace(self.prefs, theme=self.theme_var.get(), accent=self.accent_var.get(),
+                             scale=scale, chime=bool(self.chime_var.get()))
+        t.configure(*self.prefs.appearance)
+        self.family = t.apply(self)
+        mapping = {old: new for old, new in zip(before.values(), t.colors().values()) if old != new}
+        self.configure(bg=t.BG)
+        t.recolor(self, mapping, self.family)
+        for card in self._widgets(Card):
+            card.refresh()
+        for preview in self._widgets(Preview):
+            preview.refresh()
+        self._draw_brand()
+        self.rail_card.configure(width=t.px(214))
+        self.minsize(t.px(940), t.px(660))
+        self.table.tag_configure('alternate', background=t.ALTERNATE)
+        self.filter_results()
+        self._mark_appearance()
+        self.scale_label.configure(text=f'{self.prefs.scale:.0%}')
+        if persist:
+            self._save_preferences()
+            self.status.set(f'Appearance saved · {self.prefs.theme} · {self.prefs.scale:.0%}')
+
+    def _mark_appearance(self):
+        """Show which theme and accent are active."""
+        for name, button in self.theme_buttons.items():
+            button.configure(style='CardPrimary.TButton' if name == self.prefs.theme else 'TButton')
+        for color, swatch in self.accent_swatches.items():
+            swatch.configure(highlightbackground=t.INK if color == self.prefs.accent else t.CARD,
+                             width=t.px(30), height=t.px(30))
+
+    def copy_pixel(self):
+        if not self.pixel_hex:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(self.pixel_hex)
+        self.status.set(f'Copied {self.pixel_hex} to the clipboard.')
+
+    def choose_accent(self):
+        from tkinter import colorchooser
+        chosen = colorchooser.askcolor(color=self.accent_var.get(), parent=self, title='Accent colour')[1]
+        if chosen:
+            self.accent_var.set(chosen.upper())
+            self.apply_appearance()
+
+    def reset_appearance(self):
+        defaults = preferences.Preferences()
+        self.theme_var.set(defaults.theme)
+        self.accent_var.set(defaults.accent)
+        self.scale_var.set(defaults.scale)
+        self.chime_var.set(defaults.chime)
+        self.apply_appearance()
+
+    def _save_preferences(self):
+        try:
+            preferences.save(self.config_path, self.prefs)
+            self.cfg, _ = config.load(self.config_path)
+        except Exception as exc:
+            self.status.set(f'Could not save preferences: {exc}')
+
+    def show_recents(self):
+        menu = self.recent_menu()
+        menu.tk_popup(self.recent_button.winfo_rootx(),
+                      self.recent_button.winfo_rooty() + self.recent_button.winfo_height())
+
+    def recent_menu(self):
+        menu = tk.Menu(self, tearoff=0, bg=t.CARD, fg=t.INK, activebackground=t.SELECTED,
+                       activeforeground=t.INK, bd=0, activeborderwidth=0)
+        if not self.prefs.recents:
+            menu.add_command(label='No recent recordings yet', state='disabled')
+        for path in self.prefs.recents:
+            exists = Path(path).is_file()
+            menu.add_command(label=Path(path).name if exists else f'{Path(path).name}  (missing)',
+                             state='normal' if exists and not self.working else 'disabled',
+                             command=lambda p=path: self.open_file(p))
+        menu.add_separator()
+        menu.add_command(label='Clear list', command=self.clear_recents,
+                         state='normal' if self.prefs.recents else 'disabled')
+        return menu
+
+    def clear_recents(self):
+        self.prefs = replace(self.prefs, recents=())
+        self._save_preferences()
+        self.status.set('Recent recordings cleared.')
+
+    def show_shortcuts(self):
+        rows = [('Ctrl+O', 'Open a recording'), ('Ctrl+Enter', 'Analyze the selected range'),
+                ('Esc', 'Stop analysis, keeping partial results'),
+                ('Ctrl+1 … Ctrl+4', 'Recording / Highlights / Inspector / Settings'),
+                ('Ctrl+F', 'Search highlights by player'),
+                ('Ctrl+A', 'Select all visible highlights (in the table)'),
+                ('Enter', 'Preview the selected highlight'),
+                ('F2', 'Rename the selected highlight'),
+                ('Delete', 'Remove the selected highlights'),
+                ('Ctrl+Z', 'Undo the last removal'),
+                ('Ctrl+C', 'Copy selected timestamps'),
+                ('F1', 'This list')]
+        dialog = tk.Toplevel(self)
+        dialog.title('Keyboard shortcuts · Killcutter')
+        dialog.configure(bg=t.BG)
+        dialog.transient(self)
+        card = Card(dialog)
+        card.pack(fill='both', expand=True, padx=16, pady=16)
+        label(card.content, 'Keyboard shortcuts', size=18, bold=True).pack(anchor='w', pady=(0, 14))
+        for keys, description in rows:
+            row = tk.Frame(card.content, bg=t.CARD)
+            row.pack(fill='x', pady=3)
+            label(row, keys, color=t.ACCENT, width=18).pack(side='left')
+            label(row, description, color=t.MUTED).pack(side='left')
+        ttk.Button(card.content, text='Done', command=dialog.destroy).pack(anchor='w', pady=(16, 0))
+        dialog.bind('<Escape>', lambda _: dialog.destroy())
+        dialog.update_idletasks()
+        dialog.geometry(f'+{self.winfo_rootx()+80}+{self.winfo_rooty()+70}')
+
+    # ----- editing the highlight list ------------------------------------
+
+    def _selected_indexes(self):
+        return sorted(int(i) for i in self.table.selection())
+
+    def _relabel(self, keep):
+        """Keep export bookkeeping aligned after the clip list is re-indexed."""
+        self.exported_ids = {str(new) for new, old in enumerate(keep) if str(old) in self.exported_ids}
+
+    def remove_selected(self, event=None):
+        if self.working or not self.table.selection():
+            return 'break'
+        doomed = self._selected_indexes()
+        self.removed = [(i, self.state.clips[i]) for i in doomed]
+        keep = [i for i in range(len(self.state.clips)) if i not in set(doomed)]
+        self._relabel(keep)
+        self.state.clips = [self.state.clips[i] for i in keep]
+        self.exported = not self.state.clips or self.exported_ids == {str(i) for i in range(len(self.state.clips))}
+        self._after_edit(f"Removed {len(doomed)} highlight{'s' if len(doomed) != 1 else ''}. Ctrl+Z restores them.")
+        return 'break'
+
+    def undo_remove(self):
+        if self.working or not self.removed:
+            return
+        clips = list(self.state.clips)
+        for index, clip in self.removed:
+            clips.insert(min(index, len(clips)), clip)
+        self.state.clips = clips
+        self.exported_ids.clear()
+        self.exported = False
+        restored = len(self.removed)
+        self.removed = []
+        self._after_edit(f"Restored {restored} highlight{'s' if restored != 1 else ''}.")
+
+    def rename_selected(self, event=None):
+        from tkinter import simpledialog
+        selection = self._selected_indexes()
+        if self.working or not selection:
+            return 'break'
+        clip = self.state.clips[selection[0]]
+        name = simpledialog.askstring('Rename highlight', 'Player or moment:', initialvalue=clip.name, parent=self)
+        if name and name.strip():
+            clip.name = name.strip()
+            self.exported_ids.discard(str(selection[0]))
+            self.exported = False
+            self._after_edit(f'Renamed to {clip.name}.')
+        return 'break'
+
+    def adjust_selected(self, seconds, *, edge):
+        """Nudge the in or out point of every selected highlight."""
+        selection = self._selected_indexes()
+        if self.working or not selection or not self.state.media:
+            return
+        limit = self.state.media.duration
+        for index in selection:
+            clip = self.state.clips[index]
+            if edge == 'start':
+                clip.start = min(max(0, clip.start + seconds), clip.end - .1)
+            else:
+                clip.end = max(min(limit, clip.end + seconds), clip.start + .1)
+            self.exported_ids.discard(str(index))
+        self.exported = False
+        self._after_edit(f"{'Start' if edge == 'start' else 'End'} nudged {seconds:+g}s on {len(selection)} highlight(s).")
+
+    def _after_edit(self, message):
+        keep = set(self.table.selection())
+        self._sync_live()
+        self.filter_results()
+        for iid in keep:
+            if self.table.exists(iid):
+                self.table.selection_add(iid)
+        total = sum(c.duration for c in self.state.clips)
+        prefix = '' if self.state.completed else 'Partial results · '
+        self.results_summary.configure(text=f'{prefix}{len(self.state.clips)} highlights  /  {clock(total)}'
+                                       if self.state.clips else 'No highlights')
+        self.status.set(message)
+
+    def _sync_live(self):
+        """Rebuild the live list so its rows keep matching the clip indexes."""
+        self.live_table.delete(*self.live_table.get_children())
+        for index, clip in enumerate(self.state.clips):
+            self.live_table.insert('', 'end', iid=str(index), text=clock(clip.start).split('.')[0], values=(clip.name,))
+        self.live_count.set(f"{len(self.state.clips)} highlight{'s' if len(self.state.clips) != 1 else ''}")
+
     def error(self, title, message):
         self.status.set(message)
         messagebox.showerror(title, message, parent=self)
@@ -581,6 +829,8 @@ class Application(Views, tk.Tk):
             return
         if self.state.clips and not self.exported and not messagebox.askyesno('Close without exporting?', 'Your highlights have not been exported. Close this workspace?', parent=self):
             return
+        self.prefs = replace(self.prefs, geometry=self.winfo_geometry(), page=self.current_page)
+        self._save_preferences()
         if self.seek_timer:
             self.after_cancel(self.seek_timer)
         self.after_cancel(self.poll_timer)

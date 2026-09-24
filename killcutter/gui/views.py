@@ -6,6 +6,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 from killcutter import config
+from . import preferences
 from . import theme as t
 from .widgets import Card, Preview, ScrollForm, label
 
@@ -105,6 +106,10 @@ class Views:
         self.search_entry.pack(side='left', fill='x', expand=True)
         ttk.Button(search, text='Clear', command=lambda: self.search_var.set('')).pack(side='left', padx=(8, 0))
         label(bar.content, textvariable=self.selected_var, color=t.MUTED).pack(anchor='w', pady=(10, 0))
+        actions = tk.Frame(page, bg=t.BG)
+        trim = tk.Frame(page, bg=t.BG)
+        trim.pack(side='bottom', fill='x', pady=(10, 0))
+        actions.pack(side='bottom', fill='x', pady=(14, 0))
         well = Card(page)
         well.pack(fill='both', expand=True)
         self.table = ttk.Treeview(well.content, columns=('player', 'in', 'out', 'duration'), show='headings', selectmode='extended')
@@ -119,15 +124,25 @@ class Views:
         self.table.bind('<Double-1>', lambda _: self.preview_result())
         self.table.bind('<Return>', lambda _: self.preview_result())
         self.table.bind('<Control-a>', self.select_all_results)
-        self.table.tag_configure('alternate', background='#22222B')
-        actions = tk.Frame(page, bg=t.BG)
-        actions.pack(fill='x', pady=(14, 0))
+        self.table.bind('<Delete>', self.remove_selected)
+        self.table.bind('<F2>', self.rename_selected)
+        self.table.bind('<Control-c>', lambda _: self.copy_selection())
+        self.table.tag_configure('alternate', background=t.ALTERNATE)
         self.result_buttons = []
         for title, command in [('Select all', self.select_all_results),
-                               ('Preview', self.preview_result), ('Copy', self.copy_selection), ('Timestamps', lambda: self.export_selection('timestamps')),
+                               ('Preview', self.preview_result), ('Rename…', self.rename_selected),
+                               ('Remove', self.remove_selected), ('Copy', self.copy_selection),
+                               ('Timestamps', lambda: self.export_selection('timestamps')),
                                ('Export EDL', lambda: self.export_selection('edl')), ('Render MP4', lambda: self.export_selection('mp4'))]:
             button = ttk.Button(actions, text=title, command=command, style='Toolbar.TButton')
             button.pack(side='left', padx=(0, 8))
+            self.result_buttons.append(button)
+        label(trim, 'NUDGE SELECTED', size=9, color=t.MUTED, bold=True).pack(side='left', padx=(0, 10))
+        for title, seconds, edge in [('In −1s', -1, 'start'), ('In +1s', 1, 'start'),
+                                     ('Out −1s', -1, 'end'), ('Out +1s', 1, 'end')]:
+            button = ttk.Button(trim, text=title, style='Toolbar.TButton', width=8,
+                                command=lambda s=seconds, e=edge: self.adjust_selected(s, edge=e))
+            button.pack(side='left', padx=(0, 6))
             self.result_buttons.append(button)
 
     def _build_inspector(self):
@@ -139,18 +154,69 @@ class Views:
         self.inspector.pack(fill='both', expand=True)
         info = Card(page)
         info.pack(fill='x')
-        self.pixel_info = label(info.content, 'No pixel selected', size=18, bold=True)
-        self.pixel_info.pack(anchor='w')
+        top = tk.Frame(info.content, bg=t.CARD)
+        top.pack(fill='x')
+        self.pixel_swatch = tk.Frame(top, bg=t.FIELD, width=t.px(34), height=t.px(34),
+                                     highlightthickness=1, highlightbackground=t.BORDER)
+        self.pixel_swatch.pack(side='left', padx=(0, 12))
+        self.pixel_swatch.pack_propagate(False)
+        self.pixel_info = label(top, 'No pixel selected', size=18, bold=True)
+        self.pixel_info.pack(side='left')
         label(info.content, 'Seek in Recording, then click a pixel here. Coordinates use the original video resolution.\nInspection is a calibration building block; saved samples do not change detection yet.',
               color=t.MUTED, justify='left', wraplength=760).pack(anchor='w', pady=(8, 12))
-        self.save_sample_button = ttk.Button(info.content, text='Save pixel sample…', command=self.save_sample)
-        self.save_sample_button.pack(anchor='w')
+        buttons = tk.Frame(info.content, bg=t.CARD)
+        buttons.pack(anchor='w')
+        self.save_sample_button = ttk.Button(buttons, text='Save pixel sample…', command=self.save_sample)
+        self.save_sample_button.pack(side='left')
+        self.copy_pixel_button = ttk.Button(buttons, text='Copy colour', command=self.copy_pixel)
+        self.copy_pixel_button.pack(side='left', padx=8)
 
     def _build_settings(self):
         form = ScrollForm(self._page('settings'))
         form.pack(fill='both', expand=True)
         self.setting_vars = {}
         defaults = Path.home() / 'Videos' / 'Killcutter'
+        look = Card(form.body)
+        look.pack(fill='x', pady=(0, 14))
+        label(look.content, 'Appearance', size=20, bold=True).pack(anchor='w')
+        label(look.content, 'Theme, accent and interface scale are stored on this machine and apply instantly.',
+              color=t.MUTED).pack(anchor='w', pady=(5, 16))
+        themes = tk.Frame(look.content, bg=t.CARD)
+        themes.pack(fill='x')
+        label(themes, 'Theme', width=19).pack(side='left')
+        self.theme_buttons = {}
+        for name in t.PALETTES:
+            button = ttk.Button(themes, text=name, width=11,
+                                command=lambda n=name: (self.theme_var.set(n), self.apply_appearance()))
+            button.pack(side='left', padx=(0, 8))
+            self.theme_buttons[name] = button
+        accents = tk.Frame(look.content, bg=t.CARD)
+        accents.pack(fill='x', pady=(14, 0))
+        label(accents, 'Accent', width=19).pack(side='left')
+        self.accent_swatches = {}
+        for name, color in t.ACCENTS.items():
+            swatch = tk.Frame(accents, bg=color, width=t.px(30), height=t.px(30),
+                              highlightthickness=2, highlightbackground=t.CARD, cursor='hand2')
+            swatch.pack(side='left', padx=(0, 8))
+            swatch.pack_propagate(False)
+            swatch.bind('<Button-1>', lambda _, c=color: (self.accent_var.set(c), self.apply_appearance()))
+            self.accent_swatches[color] = swatch
+        ttk.Button(accents, text='Custom…', command=self.choose_accent).pack(side='left', padx=(6, 0))
+        scale_row = tk.Frame(look.content, bg=t.CARD)
+        scale_row.pack(fill='x', pady=(16, 0))
+        label(scale_row, 'Interface scale', width=19).pack(side='left')
+        self.scale_label = label(scale_row, f'{self.prefs.scale:.0%}', width=6, color=t.ACCENT)
+        self.scale_label.pack(side='right')
+        slider = ttk.Scale(scale_row, from_=preferences.MIN_SCALE, to=preferences.MAX_SCALE,
+                           variable=self.scale_var,
+                           command=lambda v: self.scale_label.configure(text=f'{float(v):.0%}'))
+        slider.pack(side='left', fill='x', expand=True, padx=(0, 12))
+        # Restyling on release only: a full rebuild on every drag step would stutter.
+        slider.bind('<ButtonRelease-1>', lambda _: self.apply_appearance())
+        ttk.Checkbutton(look.content, text='Chime when an analysis finishes', variable=self.chime_var,
+                        command=self.apply_appearance).pack(anchor='w', pady=(16, 0))
+        ttk.Button(look.content, text='Reset appearance', command=self.reset_appearance).pack(anchor='w', pady=(12, 0))
+        self._mark_appearance()
         folders = Card(form.body)
         folders.pack(fill='x', pady=(0, 14))
         label(folders.content, 'A place for everything.', size=20, bold=True).pack(anchor='w')

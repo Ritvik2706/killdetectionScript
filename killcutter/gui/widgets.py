@@ -9,32 +9,50 @@ from .surfaces import rounded_surface
 
 
 class Card(tk.Frame):
-    def __init__(self, parent, padding=18, color=t.CARD, **kwargs):
+    """A rounded surface. ``role`` names a palette entry so it can be restyled."""
+    def __init__(self, parent, padding=18, role='CARD', **kwargs):
         super().__init__(parent, bg=t.BG, **kwargs)
         self.background = tk.Canvas(self, bg=t.BG, highlightthickness=0)
         self.background.place(x=0, y=0, relwidth=1, relheight=1)
-        self.color = color
-        self.content = tk.Frame(self, bg=color)
-        self.content.pack(fill='both', expand=True, padx=padding, pady=padding)
-        self.background.bind('<Configure>', self._draw)
+        self.role = role
+        self.padding = padding
+        self.content = tk.Frame(self, bg=self.color)
+        self.content.pack(fill='both', expand=True, padx=t.px(padding), pady=t.px(padding))
+        self.background.bind('<Configure>', lambda e: self._draw(e.width, e.height))
 
-    def _draw(self, event):
+    @property
+    def color(self):
+        return getattr(t, self.role)
+
+    def refresh(self):
+        self.configure(bg=t.BG)
+        self.background.configure(bg=t.BG)
+        self.content.configure(bg=self.color)
+        self.content.pack_configure(padx=t.px(self.padding), pady=t.px(self.padding))
+        self._draw(self.background.winfo_width(), self.background.winfo_height())
+
+    def _draw(self, width, height):
+        if width < 2 or height < 2:
+            return
         self.photo = ImageTk.PhotoImage(rounded_surface(
-            event.width, event.height, 18, self.color, t.BORDER), master=self)
+            width, height, t.px(18), self.color, t.BORDER), master=self)
         self.background.delete('all')
         self.background.create_image(0, 0, anchor='nw', image=self.photo)
 
 
 
-def label(parent, text='', *, size=10, color=t.INK, bold=False, **kwargs):
-    widget = tk.Label(parent, text=text, bg=parent.cget('bg'), fg=color,
-                      font=(parent.winfo_toplevel().family, size, 'bold' if bold else 'normal'), anchor='w', **kwargs)
+def label(parent, text='', *, size=10, color=None, bold=False, **kwargs):
+    widget = tk.Label(parent, text=text, bg=parent.cget('bg'), fg=color or t.INK,
+                      font=(t.FAMILY, t.size(size), 'bold' if bold else 'normal'),
+                      anchor='w', **kwargs)
+    # Remembered so a scale or theme change can rebuild the same type hierarchy.
+    widget.base_size, widget.base_bold = size, bold
     return widget
 
 
 class Preview(tk.Canvas):
     def __init__(self, parent, on_pixel=None, **kwargs):
-        super().__init__(parent, bg='#101116', highlightthickness=1,
+        super().__init__(parent, bg=t.PREVIEW, highlightthickness=1,
                          highlightbackground=t.BORDER, **kwargs)
         self.image = None
         self.photo = None
@@ -42,6 +60,10 @@ class Preview(tk.Canvas):
         self.on_pixel = on_pixel
         self.bind('<Configure>', lambda _: self.redraw())
         self.bind('<Button-1>', self._click)
+
+    def refresh(self):
+        self.configure(bg=t.PREVIEW, highlightbackground=t.BORDER)
+        self.redraw()
 
     def set_image(self, image):
         self.image = image
@@ -58,9 +80,9 @@ class Preview(tk.Canvas):
             self.create_rectangle(cx-26, cy-65, cx+26, cy-29, outline=t.BORDER, width=2)
             self.create_polygon(cx-6, cy-56, cx-6, cy-38, cx+10, cy-47, fill=t.ACCENT)
             self.create_text(cx, cy+1, text='Your next highlight starts here.', fill=t.INK,
-                             font=('', 16, 'bold'), width=max(100, width-60))
+                             font=('', t.size(16), 'bold'), width=max(100, width-60))
             self.create_text(cx, cy+39, text='Open a recording to explore the frames and choose a range.',
-                             fill=t.MUTED, font=('', 10), width=max(100, width-80))
+                             fill=t.MUTED, font=('', t.size(10)), width=max(100, width-80))
             return
         x, y, w, h = image_rect(self.image.width, self.image.height, width, height)
         self.photo = ImageTk.PhotoImage(self.image.resize((w, h), Image.Resampling.LANCZOS), master=self)

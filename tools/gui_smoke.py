@@ -80,11 +80,30 @@ def main():
         app.inspect_pixel(100, 100, (30, 100, 180))
         assert app.sample['x'] == 100
         capture(app, folder / 'inspector.png')
+        app.show('results')
+        app.table.selection_set('0')
+        app.remove_selected()
+        assert not app.state.clips
+        app.undo_remove()
+        assert len(app.state.clips) == 1
         app.show('settings')
         app.save_settings()
         assert (folder / 'config.toml').exists()
         capture(app, folder / 'settings.png')
-        print(f'PASS: import, frame seek, range, live merge, highlights, compact layout, inspector, saved settings. Screenshots: {folder}')
+        for theme, scale in [('Graphite', 1.0), ('Daylight', 1.25)]:
+            app.theme_var.set(theme)
+            app.scale_var.set(scale)
+            app.accent_var.set('#7D5BED' if theme == 'Daylight' else '#22B8A6')
+            app.apply_appearance()
+            pump(app, seconds=.3)
+            capture(app, folder / f'appearance-{theme.lower()}.png')
+            app.show('workspace')
+            capture(app, folder / f'workspace-{theme.lower()}.png')
+            app.show('settings')
+        app.reset_appearance()
+        pump(app, seconds=.3)
+        print(f'PASS: import, frame seek, range, live merge, highlights, remove/undo, compact layout, '
+              f'inspector, saved settings, themes and scaling. Screenshots: {folder}')
     finally:
         app.exported = True
         app.working = None

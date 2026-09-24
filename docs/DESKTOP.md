@@ -66,6 +66,8 @@ only for MP4 rendering. Settings → Check environment reports dependencies.
 ## Working workflow
 
 1. **Recording** opens a native file picker, loads metadata and displays a frame.
+   **Recent ▾** in the header reopens one of the last eight recordings; entries
+   whose file has moved are shown as missing rather than silently failing.
    Scrub the slider to inspect frames; preview decoding runs off the UI thread.
    The current foundation is a frame viewer, not a real-time video/audio player.
 2. Enter IN/OUT times or set them from the current frame. OUT includes that
@@ -85,6 +87,12 @@ only for MP4 rendering. Settings → Check environment reports dependencies.
    **Copy** for clipboard timestamps. Selection stays tied to the same clips
    when sorting. Select all applies to the visible search results; exports remain
    in chronological order. The selection summary shows count and total duration.
+   **Rename…** (F2) relabels a detection whose OCR name came out wrong, **Remove**
+   (Delete) drops false positives, and **Ctrl+Z** restores the last removal.
+   **Nudge selected** shifts the in or out point of every selected highlight by a
+   second, clamped inside the recording and never past the other end. Edits
+   re-index the list, so an export mark follows its clip and an edited clip is
+   marked unexported again.
    Nothing is exported automatically. Exporting only some rows does not mark
    the other rows as saved. Closing or replacing unexported results prompts.
 5. **Settings** saves independent input, timestamp, EDL and MP4 directories,
@@ -94,8 +102,28 @@ only for MP4 rendering. Settings → Check environment reports dependencies.
    choose other locations with the folder pickers. The working directory of a
    packaged executable is not used as the default export destination.
 6. **Frame inspector** maps a click through the letterboxed preview into the
-   original frame's X/Y coordinates and RGB value. Save this as versioned JSON.
-   Samples are inspection data; they do not yet modify detection rules.
+   original frame's X/Y coordinates, RGB value and hex, with a colour swatch and
+   **Copy colour**. Save this as versioned JSON. Samples are inspection data;
+   they do not yet modify detection rules.
+
+## Appearance and session state
+
+Settings → Appearance holds the desktop-only preferences: a **theme**
+(Midnight, Graphite, Daylight), an **accent** from six presets or any custom
+colour, an **interface scale** from 80% to 160%, and a **chime** when an
+analysis finishes. Changes apply to the live window — the ttk styles are
+rebuilt, plain Tk widgets are remapped from the old palette to the new, and
+every label rebuilds at its own scaled size, so the type hierarchy is kept.
+Only colours that came from the previous palette are replaced, so a deliberate
+one-off colour survives. Restyling happens when a slider is released, not on
+every drag step.
+
+These live in the same config file as the CLI settings, under `[gui]`, together
+with the window geometry, the last page, and the recent recordings list. Every
+value is validated when read: an out-of-range scale is clamped and anything
+unusable falls back to the default, so a hand-edited or stale file can't stop
+the app from starting. They are written as soon as they change, and the window
+geometry and page are written on close.
 
 Analysis, frame decoding, environment checks, and export happen in workers.
 Only the Tk thread owns widgets and image handles. EDL/timestamps are atomic,
@@ -113,6 +141,11 @@ while an export finishes; MP4 rendering does not yet have a cancel control.
 | Ctrl+F | Search highlights by player |
 | Ctrl+A in the highlights table | Select all visible highlights |
 | Enter in the highlights table | Preview the selected highlight |
+| F2 in the highlights table | Rename the selected highlight |
+| Delete in the highlights table | Remove the selected highlights |
+| Ctrl+Z | Undo the last removal |
+| Ctrl+C in the highlights table | Copy selected timestamps |
+| F1 | Show this list in the app |
 
 The recording controls also step one frame or five seconds in either direction.
 Cards, buttons, and input fields use antialiased rounded surfaces. Buttons and
@@ -148,7 +181,8 @@ playback can be added without replacing the detection engine.
 |---|---|
 | `gui/app.py` | Navigation, workflow state, queue polling, native dialogs |
 | `gui/views.py` | Page layouts and bindings to application actions |
-| `gui/theme.py` | Palette, typography and widget styles |
+| `gui/theme.py` | Palettes, accent/scale wiring, typography and widget styles |
+| `gui/preferences.py` | Validated `[gui]` preferences: theme, accent, scale, chime, session |
 | `gui/surfaces.py` | Bounded corner cache and antialiased surface rendering |
 | `gui/widgets.py` | Reusable cards, preview canvas and scrollable forms |
 | `gui/state.py` | Media/workspace models and pure image-coordinate mapping |
@@ -173,5 +207,6 @@ python -m pytest tests/test_gui.py -q
 ```
 
 `python tools/gui_smoke.py` opens a real window, creates synthetic footage,
-exercises import/seeking/live updates/compact layout/settings/inspection, and saves window screenshots in a
-temporary directory. No game recording or OCR service is required for this test.
+exercises import/seeking/live updates/compact layout/settings/inspection,
+removal and undo, and each theme at a scaled size, and saves window screenshots
+in a temporary directory. No game recording or OCR service is required for this test.

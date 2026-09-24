@@ -224,3 +224,111 @@ def test_gui_scan_error_retains_live_results(app, monkeypatch):
     app._update_controls()
     assert not app.result_buttons[1].instate(['disabled'])
     assert errors
+
+
+def test_preferences_reject_unusable_values():
+    from killcutter.gui import preferences, theme
+    cfg = {'gui': {'theme': 'Neon', 'accent': 'not-a-colour', 'scale': 9, 'chime': 'yes',
+                   'geometry': 'huge', 'page': 'nowhere', 'recents': ['a.mkv', 7, 'b.mkv']}}
+    prefs = preferences.load(cfg)
+    assert prefs.theme in theme.PALETTES and prefs.accent == theme.ACCENTS['Blue']
+    assert prefs.scale == preferences.MAX_SCALE  # clamped, not rejected
+    assert prefs.chime is True and prefs.geometry == '' and prefs.page == 'workspace'
+    assert prefs.recents == ('a.mkv', 'b.mkv')
+    good = preferences.load({'gui': {'theme': 'Daylight', 'accent': '#22b8a6', 'scale': 1.25,
+                                     'chime': False, 'geometry': '1200x800+10+10', 'page': 'results'}})
+    assert good.appearance == ('Daylight', '#22B8A6', 1.25)
+    assert good.chime is False and good.page == 'results'
+
+
+def test_recents_promote_without_duplicates():
+    from killcutter.gui import preferences
+    prefs = preferences.Preferences()
+    for path in ('a.mkv', 'b.mkv', 'a.mkv'):
+        prefs = preferences.remember(prefs, path)
+    assert prefs.recents == ('a.mkv', 'b.mkv')
+    for index in range(preferences.RECENT_LIMIT + 3):
+        prefs = preferences.remember(prefs, f'{index}.mkv')
+    assert len(prefs.recents) == preferences.RECENT_LIMIT
+
+
+def test_palette_roles_are_complete_and_accents_readable():
+    from killcutter.gui import theme
+    for name, colors in theme.PALETTES.items():
+        assert len(colors) == len(theme.ROLES), name
+    for accent in theme.ACCENTS.values():
+        theme.configure('Midnight', accent, 1.0)
+        assert theme.ON_ACCENT in ('white', '#101014')
+        assert theme.SELECTED != theme.BG  # a selected row must stay visible
+    theme.configure()
+
+
+def test_scaling_keeps_the_type_hierarchy():
+    from killcutter.gui import theme
+    theme.configure(scale=1.5)
+    assert theme.size(10) == 15 and theme.size(21) > theme.size(10) and theme.px(38) == 57
+    theme.configure(scale=1.0)
+    assert theme.size(10) == 10
+
+
+def test_gui_appearance_applies_and_persists(app):
+    from killcutter.gui import preferences, theme
+    from killcutter import config
+    app.theme_var.set('Daylight')
+    app.accent_var.set('#22B8A6')
+    app.scale_var.set(1.2)
+    app.chime_var.set(False)
+    app.apply_appearance()
+    app.update()
+    assert theme.BG == theme.PALETTES['Daylight'][0]
+    assert app.rail_card.content.cget('bg') == theme.SIDEBAR
+    assert app.preview.cget('bg') == theme.PREVIEW
+    assert app.theme_buttons['Daylight'].cget('style') == 'CardPrimary.TButton'
+    # Accent-tinted labels follow the new accent, not just the palette roles.
+    assert app.scale_label.cget('fg') == '#22B8A6'
+    assert app.scale_label.cget('font').split()[-2] == str(theme.size(10))
+    saved = preferences.load(config.load(app.config_path)[0])
+    assert saved.appearance == ('Daylight', '#22B8A6', 1.2) and saved.chime is False
+    app.reset_appearance()
+    assert app.prefs.appearance == preferences.Preferences().appearance
+
+
+def test_gui_remove_undo_rename_and_nudge(app, tmp_path, monkeypatch):
+    from killcutter.gui.state import Media
+    from tkinter import simpledialog
+    app.state.media = Media(str(tmp_path / 'source.mkv'), 30, 120, 1920, 1080)
+    app.state.clips = [Clip(10, 15, 'Alpha'), Clip(20, 25, 'Beta'), Clip(30, 35, 'Gamma')]
+    app.state.completed = True
+    app.exported_ids = {'0', '1', '2'}
+    app.filter_results()
+    app.table.selection_set('1')
+    app.remove_selected()
+    assert [c.name for c in app.state.clips] == ['Alpha', 'Gamma']
+    assert app.exported_ids == {'0', '1'}  # Gamma keeps its exported mark at its new index
+    assert app.live_table.item('1', 'values') == ('Gamma',)
+    app.undo_remove()
+    assert [c.name for c in app.state.clips] == ['Alpha', 'Beta', 'Gamma']
+    assert not app.exported
+    app.table.selection_set('0')
+    monkeypatch.setattr(simpledialog, 'askstring', lambda *a, **k: '  Delta  ')
+    app.rename_selected()
+    assert app.state.clips[0].name == 'Delta'
+    app.table.selection_set('0')
+    app.adjust_selected(-2, edge='start')
+    app.adjust_selected(3, edge='end')
+    assert app.state.clips[0] == Clip(8, 18, 'Delta')
+    app.adjust_selected(-999, edge='start')
+    assert app.state.clips[0].start == 0  # clamped to the recording, never past the out point
+
+
+def test_gui_recent_recordings_menu(app, tmp_path):
+    from killcutter.gui import preferences
+    present, missing = tmp_path / 'kept.mkv', tmp_path / 'gone.mkv'
+    present.touch()
+    app.prefs = preferences.remember(preferences.remember(app.prefs, str(missing)), str(present))
+    menu = app.recent_menu()
+    assert menu.entrycget(0, 'label') == 'kept.mkv'
+    assert menu.entrycget(1, 'label').endswith('(missing)')
+    assert str(menu.entrycget(1, 'state')) == 'disabled'
+    app.clear_recents()
+    assert app.recent_menu().entrycget(0, 'label') == 'No recent recordings yet'

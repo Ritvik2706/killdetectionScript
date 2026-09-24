@@ -59,6 +59,10 @@ name = "Kill Highlights" # sequence name shown in Premiere
 
 [ui]
 color = true             # set false to disable ANSI colour everywhere
+
+# [gui] is written by the desktop app (theme, accent, scale, chime, window
+# geometry, last page, recent recordings). Edit it there; anything unusable
+# here falls back to the default instead of stopping the app.
 """
 
 
