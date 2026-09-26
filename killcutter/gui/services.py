@@ -41,6 +41,7 @@ class Jobs:
         self.events = Queue()
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='killcutter-job')
         self.preview_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='killcutter-preview')
+        self.library_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='killcutter-library')
         self.cancel = Event()
         self.future = None
         self.preview_future = None
@@ -74,6 +75,7 @@ class Jobs:
     def close(self):
         self.closed = True
         self.cancel.set()
+        self.library_pool.shutdown(wait=False, cancel_futures=True)
         self.pool.shutdown(wait=False, cancel_futures=True)
         self.preview_pool.shutdown(wait=False, cancel_futures=True)
 
@@ -97,10 +99,10 @@ class Reporter:
 
     def kill(self, index, at, clip):
         self.index = index - 1
-        self.events.put(('highlight', (self.index, at, replace(clip), False), None))
+        self.events.put(('highlight', (self.index, at, replace(clip, traits=dict(clip.traits)), False), None))
 
     def extended(self, clip):
-        self.events.put(('highlight', (self.index, clip.end, replace(clip), True), None))
+        self.events.put(('highlight', (self.index, clip.end, replace(clip, traits=dict(clip.traits)), True), None))
 
     def aborted(self, *args):
         pass
@@ -114,8 +116,20 @@ class Reporter:
 
 
 def analyze(jobs, media, settings, start, end, region_override=None):
-    if not environment.configure_tesseract():
+    if (settings.preset is None or settings.preset.needs_ocr) and not environment.configure_tesseract():
         from killcutter.errors import DependencyError
         raise DependencyError("Tesseract OCR was not found. Install it and check Environment in Settings.")
     return detection.detect(media.path, settings, Reporter(jobs.events), start=start, end=end,
                             cancelled=jobs.cancel.is_set, region_override=region_override)
+
+
+def inspect_region_text(image, region):
+    """Read exactly the ROI used by text detection, off the Tk thread."""
+    import numpy as np
+    from killcutter.presets import Preset
+    from killcutter.errors import DependencyError
+    if not environment.configure_tesseract():
+        raise DependencyError('Tesseract OCR was not found. Install Tesseract or set KILLCUTTER_TESSERACT to its executable.')
+    x, y, w, h = Preset('preview', 'Preview', region=region).box(*image.size)
+    roi = cv2.cvtColor(np.asarray(image.crop((x, y, x+w, y+h)).convert('RGB')), cv2.COLOR_RGB2BGR)
+    return '\n'.join(detection._ocr_lines(roi, timeout=15))

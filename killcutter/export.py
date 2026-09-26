@@ -108,7 +108,8 @@ def build_edl(plan: ExportPlan) -> str:
     # EDL reel names max out at 8 chars; Premiere relinks via FROM CLIP NAME.
     reel = re.sub(r"[^A-Za-z0-9]", "", os.path.splitext(plan.video_basename)[0])[:8].upper() or "AX"
 
-    lines = [f"TITLE: {plan.sequence_name}", f"FCM: {fcm}", ""]
+    lines = [f"TITLE: {plan.sequence_name}", f"FCM: {fcm}",
+             f"* KILLCUTTER FPS: {plan.fps:.12g}", ""]
     rec_pos = 0.0
     for i, clip in enumerate(plan.clips):
         src_in = seconds_to_timecode(clip.start, plan.fps)
@@ -123,6 +124,8 @@ def build_edl(plan: ExportPlan) -> str:
         lines.append(f"* FROM CLIP NAME: {plan.video_basename}")
         if clip.name and clip.name != "???":
             lines.append(f"* COMMENT: {clip.name}")
+        if clip.traits:
+            lines.append(f"* KILLCUTTER TRAITS: {traits_mod.encode(clip.traits)}")
         lines.append("")
         rec_pos += clip.duration
 

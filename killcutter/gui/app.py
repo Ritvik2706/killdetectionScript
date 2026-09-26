@@ -2,18 +2,22 @@
 from dataclasses import replace
 from pathlib import Path
 from queue import Empty
-import json
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from killcutter import config, constants, detection, environment, export, outputs, traits
 from killcutter.ranges import parse_timestamp, resolve_range
-from . import preferences, theme as t
+from . import branding, preferences, theme as t
 from .services import Jobs, analyze, open_media
 from .state import Workspace
 from .widgets import Card, Preview, label
 from .views import Views
+from .library_views import LibraryViews
+from .edl_views import EdlViews
+from .queue_views import QueueViews
+from .preset_views import PresetViews
+from .playback_views import PlaybackViews
 
 
 def clock(seconds):
@@ -22,11 +26,12 @@ def clock(seconds):
     return f'{int(hours):02}:{int(minutes):02}:{seconds:06.3f}'
 
 
-class Application(Views, tk.Tk):
+class Application(QueueViews, EdlViews, LibraryViews, PlaybackViews, PresetViews, Views, tk.Tk):
     def __init__(self, *, config_path=None):
-        super().__init__()
+        super().__init__(className="KillcutterStudio")
         self.withdraw()
         self.title('Killcutter Studio')
+        branding.install_window_icons(self)
         self.cfg, loaded_path = config.load(config_path)
         self.config_path = loaded_path or config_path or config.user_config_path()
         self.prefs = preferences.load(self.cfg)
@@ -39,18 +44,17 @@ class Application(Views, tk.Tk):
         self.state = Workspace()
         self.jobs = Jobs()
         self.working = None
+        self.init_queue()
         self.generation = 0
         self.seek_timer = None
         self.frame_time = 0
-        self.sample = None
-        self.pixel_hex = None
         self.exported = True
         self.exported_ids = set()
         self.exporting_ids = set()
         self.analysis_title = tk.StringVar(value='Ready to analyze.')
         self.live_player = tk.StringVar(value='Waiting for detections')
         self.live_count = tk.StringVar(value='0 highlights')
-        self.live_detail = tk.StringVar(value='Player names and moments appear here as they are detected.')
+        self.live_detail = tk.StringVar(value='Detected labels and moments appear here during analysis.')
         self.follow_scan = tk.BooleanVar(value=True)
         self.search_var = tk.StringVar()
         self.kill_filter = tk.StringVar(value='all')
@@ -72,25 +76,28 @@ class Application(Views, tk.Tk):
         self.position_var = tk.StringVar(value='00:00:00.000')
         self.source_var = tk.StringVar(value='No recording loaded')
         self.selection_var = tk.StringVar(value='Choose your in and out points')
+        self._init_presets()
         self._build_shell()
         self._build_workspace()
         self._build_results()
-        self._build_inspector()
         self._build_settings()
+        self._build_presets()
         self.saved_values = {key: variable.get() for key, variable in self.setting_vars.items()}
+        self._build_library()
         self.show(self.prefs.page)
         self.start_var.trace_add('write', lambda *_: self._range_summary())
         self.end_var.trace_add('write', lambda *_: self._range_summary())
         for variable in (self.search_var, self.kill_filter, self.keep_unknown):
             variable.trace_add('write', lambda *_: self.filter_results())
+        self.bind('<space>', self.toggle_playback)
         self.bind('<Control-o>', lambda _: self.open_file())
         self.bind('<Control-Return>', lambda _: self.start_scan())
         self.bind('<Control-f>', self.focus_search)
-        self.bind('<Escape>', lambda _: self.stop_scan() if self.working == 'scan' else None)
+        self.bind('<Escape>', lambda _: self.stop_scan() if self.working in ('scan', 'render', 'batch') else None)
         self.bind('<F1>', lambda _: self.show_shortcuts())
         self.bind('<Control-question>', lambda _: self.show_shortcuts())
         self.bind('<Control-z>', lambda _: self.undo_remove())
-        for number, page in enumerate(('workspace', 'results', 'inspector', 'settings'), 1):
+        for number, page in enumerate(('workspace', 'results', 'presets', 'settings'), 1):
             self.bind(f'<Control-Key-{number}>', lambda _, p=page: self.show(p))
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.poll_timer = self.after(75, self._poll)
@@ -112,7 +119,7 @@ class Application(Views, tk.Tk):
         self.nav = {}
         self.pages = {}
         for key, title in [('workspace', '01   Recording'), ('results', '02   Highlights'),
-                           ('inspector', '03   Frame inspector'), ('settings', '04   Settings')]:
+                           ('presets', '03   Presets'), ('settings', '04   Settings')]:
             button = ttk.Button(rail, text=title, style='Nav.TButton', command=lambda k=key: self.show(k))
             button.pack(fill='x', padx=2, pady=3)
             self.nav[key] = button
@@ -126,9 +133,11 @@ class Application(Views, tk.Tk):
         self.open_button.pack(side='right', padx=(16, 0))
         self.recent_button = ttk.Button(self.header, text='Recent ▾', style='Toolbar.TButton', command=self.show_recents)
         self.recent_button.pack(side='right')
+        self.queue_button = ttk.Button(self.header, text='Queue (0)', style='Toolbar.TButton', command=self.show_analysis_queue)
+        self.queue_button.pack(side='right', padx=(0, 8))
         self.heading = label(self.header, '', size=26, bold=True)
         self.heading.pack(anchor='w')
-        self.subtitle = label(self.header, '', color=t.MUTED)
+        self.subtitle = label(self.header, textvariable=self.active_preset_text, color=t.ACCENT, bold=True)
         self.subtitle.pack(anchor='w', pady=(5, 0))
         self.header.bind('<Configure>', self._header_resize)
         self.host = tk.Frame(main, bg=t.BG)
@@ -142,15 +151,15 @@ class Application(Views, tk.Tk):
         footer.bind('<Configure>', lambda e: self.status_label.configure(wraplength=max(200, e.width)))
 
     def _draw_brand(self):
-        unit = t.px(42) / 42
-        self.brand.configure(width=t.px(42), height=t.px(42), bg=t.SIDEBAR)
+        size = t.px(48)
+        self.brand.configure(width=size, height=size, bg=t.SIDEBAR)
         self.brand.delete('all')
-        self.brand.create_rectangle(2*unit, 2*unit, 40*unit, 40*unit, fill=t.ACCENT, outline='')
-        self.brand.create_polygon(14*unit, 10*unit, 14*unit, 32*unit, 31*unit, 21*unit, fill=t.ON_ACCENT)
+        self.brand_photo = branding.photo(self, size)
+        self.brand.create_image(size/2, size/2, image=self.brand_photo)
 
     def _header_resize(self, event):
         available = max(180, event.width - self.open_button.winfo_reqwidth()
-                        - self.recent_button.winfo_reqwidth() - 30)
+                        - self.recent_button.winfo_reqwidth() - self.queue_button.winfo_reqwidth() - 40)
         self.heading.configure(wraplength=available, justify='left')
         self.subtitle.configure(wraplength=available, justify='left')
 
@@ -161,16 +170,17 @@ class Application(Views, tk.Tk):
         return page
 
     def show(self, key):
+        if key != 'workspace' and hasattr(self, 'player'):
+            self.stop_playback()
         titles = {
             'workspace': ('Recording', 'Select a recording. Set your range. Find the highlights.'),
             'results': ('Your highlights.', 'Review your detections and export the moments worth keeping.'),
-            'inspector': ('A closer look.', 'Inspect source pixels precisely. Build your next detection profile.'),
+            'presets': ('Detection presets', 'Choose what to detect. Create a preset from a video.'),
             'settings': ('Make it yours.', 'Saved defaults for your workflow, folders, and detection.'),
         }
         self.current_page = key
         self.prefs = replace(self.prefs, page=key)
         self.heading.configure(text=titles[key][0])
-        self.subtitle.configure(text=titles[key][1])
         self.pages[key].tkraise()
         for name, button in self.nav.items():
             button.state(['selected'] if name == key else ['!selected'])
@@ -185,7 +195,8 @@ class Application(Views, tk.Tk):
 
     def _settings(self, draft=False):
         values = {key: float(self.setting_vars['detect', key].get() if draft else self.saved_values['detect', key]) for key in ('offset', 'end_offset', 'merge_gap', 'cooldown', 'rate')}
-        settings = detection.DetectionSettings(region=constants.DEFAULT_REGION, **values)
+        settings = detection.DetectionSettings(region=constants.DEFAULT_REGION, preset=self.active_preset,
+                                               traits=self.active_preset.has_player_traits, **values)
         detection.validate(settings)
         return settings
 
@@ -202,7 +213,11 @@ class Application(Views, tk.Tk):
                 updates.setdefault(section, {})[key] = value
             config.save_updates(self.config_path, updates)
             self.cfg, _ = config.load(self.config_path)
+            previous_folder = self._folder('detect', 'clips_dir')
             self.saved_values = {key: variable.get().strip() for key, variable in self.setting_vars.items()}
+            if self.library_folder.get() == previous_folder:
+                self.library_folder.set(self._folder('detect', 'clips_dir'))
+            self.refresh_library()
             self.status.set('Settings saved. Your next scan will use these defaults.')
         except Exception as exc:
             self.error('Could not save settings', str(exc))
@@ -210,13 +225,13 @@ class Application(Views, tk.Tk):
     def open_file(self, path=None):
         if self.working:
             return
-        if self.state.clips and not self.exported and not messagebox.askyesno('Open another recording?', 'Current highlights have not been exported. Replace this workspace?', parent=self):
-            return
-        path = path or filedialog.askopenfilename(parent=self, title='Open recording',
-                                                  initialdir=self._folder('detect', 'clips_dir'),
-                                                  filetypes=[('Video recordings', '*.mp4 *.mkv *.mov *.avi *.webm *.m4v'), ('All files', '*')])
         if not path:
+            self.show_recording_picker()
             return
+        if self.state.clips and not self.exported and not messagebox.askyesno('Open another recording?', 'Current highlights have not been exported. Replace this workspace?', parent=self.recording_picker if self.library_visible else self):
+            return
+        if self.library_visible:
+            self.close_recording_picker()
         if self.seek_timer:
             self.after_cancel(self.seek_timer)
             self.seek_timer = None
@@ -226,20 +241,28 @@ class Application(Views, tk.Tk):
         self._save_preferences()
         self._begin('open', 'Opening recording…')
         self.jobs.submit('open', open_media, resolved)
+        return True
 
     def _begin(self, kind, message):
+        self.stop_playback()
         self.working = kind
         self.status.set(message)
         self._update_controls()
 
     def _update_controls(self):
         busy, loaded = bool(self.working), self.state.media is not None
+        self.update_preset_actions()
+        self.render_queue()
+        for selector in self.preset_selectors:
+            selector.configure(state='disabled' if busy else 'readonly')
+        self.edl_selector.configure(state='readonly' if loaded and not busy else 'disabled')
+        for button in self.edl_buttons:
+            button.state(['!disabled'] if loaded and not busy else ['disabled'])
         self.open_button.state(['disabled'] if busy else ['!disabled'])
+        self.play_button.state(['!disabled'] if loaded and not busy else ['disabled'])
         self.scan_button.state(['!disabled'] if loaded and not busy else ['disabled'])
-        self.cancel_button.state(['!disabled'] if self.working == 'scan' else ['disabled'])
+        self.cancel_button.state(['!disabled'] if self.working in ('scan', 'render', 'batch') else ['disabled'])
         self.seek.state(['!disabled'] if loaded and not busy else ['disabled'])
-        self.save_sample_button.state(['!disabled'] if self.sample and not busy else ['disabled'])
-        self.copy_pixel_button.state(['!disabled'] if self.pixel_hex and not busy else ['disabled'])
         selected = [self.state.clips[int(i)] for i in self.table.selection() if int(i) < len(self.state.clips)]
         self.selected_var.set(f'{len(self.table.get_children())} of {len(self.state.clips)} shown · {len(selected)} selected  ·  {clock(sum(c.duration for c in selected))} total duration')
         for index, button in enumerate(self.result_buttons):
@@ -250,6 +273,9 @@ class Application(Views, tk.Tk):
         if not self.state.media or self.working:
             return
         seconds = float(value)
+        if self.player and not self.player_stopping:
+            self.player.command('seek', seconds, 'absolute+exact')
+            return
         self.state.position = seconds
         self.position_var.set(clock(seconds))
         self.generation += 1
@@ -303,8 +329,15 @@ class Application(Views, tk.Tk):
         if self.state.clips and not self.exported and not messagebox.askyesno('Replace highlights?', 'Analyze again and replace the current unexported results?', parent=self):
             return
         self.generation += 1
+        self.reset_edl()
         self.state.clips = []
         self.state.completed = False
+        self.state.preset = self.active_preset
+        self.state.preset_id = self.active_preset.id
+        self.state.preset_name = self.active_preset.name
+        self.state.player_traits = self.active_preset.has_player_traits
+        self.kill_filter.set('all')
+        self.filter_results()
         self.exported_ids.clear()
         self.exported = True
         self.table.delete(*self.table.get_children())
@@ -313,7 +346,7 @@ class Application(Views, tk.Tk):
         self.live_count.set('0 highlights')
         self.live_player.set('Waiting for detections')
         self.analysis_title.set('Analyzing…')
-        self.live_detail.set('Looking for the ENEMY DOWNED banner…')
+        self.live_detail.set(f'Running {self.active_preset.name}…')
         self.results_summary.configure(text='Analysis in progress')
         self.scan_started = time.monotonic()
         self.scan_position = start
@@ -322,23 +355,25 @@ class Application(Views, tk.Tk):
         self.progress['value'] = 0
         self._begin('scan', 'Analyzing locally… You can stop and keep partial results.')
         self.jobs.submit('scan', analyze, self.jobs, self.state.media, settings, start, end,
-                         config.section(self.cfg, "detect").get("region"))
+                         config.section(self.cfg, "detect").get("region") if self.active_preset.has_player_traits else None)
 
     def stop_scan(self):
-        if self.working != 'scan':
+        if self.working == 'batch':
+            self.stop_queue()
+            return
+        if self.working not in ('scan', 'render'):
             return
         self.jobs.cancel.set()
+        if self.working == 'render':
+            self.status.set('Stopping export… Completed files will be kept.')
+            self.cancel_button.state(['disabled'])
+            return
         self.status.set('Stopping after the current sample… Your detected highlights will be kept.')
         self.cancel_button.state(['disabled'])
 
     def _set_frame(self, image):
         self.preview.set_image(image)
-        self.inspector.set_image(image)
         self.frame_time = self.state.position
-        self.sample = None
-        self.pixel_hex = None
-        self.pixel_info.configure(text='No pixel selected')
-        self.pixel_swatch.configure(bg=t.FIELD)
         self._update_controls()
 
     def _poll(self):
@@ -346,6 +381,12 @@ class Application(Views, tk.Tk):
             for _ in range(100):
                 kind, data, error = self.jobs.events.get_nowait()
                 if isinstance(kind, tuple):
+                    if kind[0] == 'library':
+                        self.receive_library(kind[1], data, error)
+                        continue
+                    if kind[0].startswith('playback'):
+                        self.playback_event(kind, data, error)
+                        continue
                     if kind[1] == self.generation:
                         if error:
                             self.status.set(error)
@@ -353,6 +394,21 @@ class Application(Views, tk.Tk):
                             self.state.position = kind[2]
                             self.position_var.set(clock(kind[2]))
                             self._set_frame(data)
+                    continue
+                if kind == 'batch_progress':
+                    fraction, count, eta = data
+                    self.status.set(f'Queue · {Path(self.analysis_queue[self.queue_active]["path"]).name} · {fraction:.0%} · {count} highlights')
+                    continue
+                if kind == 'batch':
+                    self.receive_batch(data, error)
+                    continue
+                if kind == 'render_progress':
+                    index, total, path = data
+                    self.exported_ids.add(self.render_ids[index - 1])
+                    self.exported = len(self.exported_ids) == len(self.state.clips)
+                    self.progress['value'] = index / total * 100
+                    if not self.jobs.cancel.is_set():
+                        self.status.set(f'Exported {index} of {total} clips · {Path(path).name}')
                     continue
                 if kind == 'scan_position':
                     self.scan_position, triggered = data
@@ -402,6 +458,10 @@ class Application(Views, tk.Tk):
                 elif kind == 'open':
                     media, image = data
                     self.state = Workspace(media=media)
+                    self.reset_edl()
+                    self.edl_choices = []
+                    self.edl_selector.configure(values=())
+                    self.removed = []
                     self.exported = True
                     self.exported_ids.clear()
                     self.table.delete(*self.table.get_children())
@@ -410,7 +470,7 @@ class Application(Views, tk.Tk):
                     self.live_count.set('0 highlights')
                     self.live_player.set('Waiting for detections')
                     self.analysis_title.set('Ready to analyze.')
-                    self.live_detail.set('Ready. Player names will appear during analysis.')
+                    self.live_detail.set('Ready. Detected labels will appear during analysis.')
                     self.progress['value'] = 0
                     self.search_var.set('')
                     self.source_var.set(f'{media.name}   ·   {media.width} × {media.height}   ·   {media.fps:g} fps')
@@ -420,6 +480,12 @@ class Application(Views, tk.Tk):
                     self._set_frame(image)
                     self.show('workspace')
                     self.status.set('Recording loaded. Scrub to a frame, choose your range, then analyze.')
+                    if getattr(self, 'queue_review', None):
+                        self.apply_queue_review()
+                    else:
+                        self.load_edl(automatic=True)
+                elif kind == 'edl':
+                    self.receive_edl(data)
                 elif kind == 'scan':
                     self.state.clips, self.state.completed = data
                     self.exported = not bool(self.state.clips)
@@ -435,12 +501,31 @@ class Application(Views, tk.Tk):
                         self.progress['value'] = 100
                     if self.prefs.chime:
                         self.bell()
-                    self.status.set(('Scan finished. Select highlights to export.' if self.state.completed else 'Scan stopped. Partial highlights are ready to export.') if self.state.clips else 'No highlights found in this range. Check the HUD layout or try another section.')
+                    self.status.set(('Scan finished. Select highlights to export.' if self.state.completed else 'Scan stopped. Partial highlights are ready to export.') if self.state.clips else 'No highlights found in this range. Check the preset, its region, or try another section.')
+                    self.show('results')
+                elif kind == 'render':
+                    complete = len(data) == len(self.render_ids)
+                    self.status.set(f'{"Export complete" if complete else "Export stopped"} · {len(data)} of {len(self.render_ids)} files saved.')
                     self.show('results')
                 elif kind == 'export':
                     self.exported_ids.update(self.exporting_ids)
                     self.exported = len(self.exported_ids) == len(self.state.clips)
                     self.status.set(f'Export complete · {data}')
+                    self.refresh_library()
+                    if self.export_kind == 'edl':
+                        if self.exported:
+                            self.load_edl(data, automatic=True)
+                        else:
+                            if data not in self.edl_choices:
+                                self.edl_choices.insert(0, data)
+                                self.edl_selector.configure(values=self.edl_choices)
+                            self.edl_note.set('Selected highlights saved to EDL; remaining unsaved highlights are still shown.')
+                elif kind == 'updates':
+                    message, url = data
+                    self.status.set(message)
+                    if messagebox.askyesno('Software updates', message + '\n\nOpen the official releases page?', parent=self):
+                        import webbrowser
+                        webbrowser.open(url)
                 elif kind == 'environment':
                     self._environment_dialog(data)
                 self._update_controls()
@@ -480,7 +565,14 @@ class Application(Views, tk.Tk):
         selected = set(self.table.selection())
         self.table.delete(*self.table.get_children())
         query = self.search_var.get().strip().casefold()
-        mode = self.kill_filter.get()
+        mode = self.kill_filter.get() if self.state.player_traits else 'all'
+        self.table.configure(displaycolumns=('player', 'type', 'in', 'out', 'duration') if self.state.player_traits else ('player', 'in', 'out', 'duration'))
+        if self.state.player_traits:
+            self.unknown_check.pack(anchor='w', pady=(8, 0), before=self.filter_hint_label)
+            self.trait_filters.pack(fill='x', pady=(12, 0), before=self.unknown_check)
+        else:
+            self.trait_filters.pack_forget()
+            self.unknown_check.pack_forget()
         for key, button in self.filter_buttons.items():
             button.state(['selected'] if key == mode else ['!selected'])
         self.unknown_check.state(['!disabled'] if mode in ('real-player', 'bot') else ['disabled'])
@@ -503,12 +595,14 @@ class Application(Views, tk.Tk):
                 self.table.selection_add(str(i))
         self.filter_hint.set('No matching highlights. Try another filter or reset filters.' if self.state.clips and not row
                              else 'Undetermined = insufficient evidence. Mixed clips count as real player if any kill is confirmed.')
+        if not self.state.player_traits:
+            self.filter_hint.set(f'Analyzed with {self.state.preset_name}. Search or select events to export.')
         self._update_controls()
 
     def sort_results(self, column):
         previous, descending = self.result_sort
         self.result_sort = (column, not descending if column == previous else False)
-        for name, title in [('player', 'PLAYER / MOMENT'), ('type', 'KILL TYPE'), ('in', 'IN'), ('out', 'OUT'), ('duration', 'DURATION')]:
+        for name, title in [('player', 'LABEL / MOMENT'), ('type', 'KILL TYPE'), ('in', 'IN'), ('out', 'OUT'), ('duration', 'DURATION')]:
             arrow = (' ↓' if self.result_sort[1] else ' ↑') if name == column else ''
             self.table.heading(name, text=title + arrow)
         self.filter_results()
@@ -556,15 +650,19 @@ class Application(Views, tk.Tk):
         else:
             suffix = '_highlights.edl' if kind == 'edl' else '_timestamps.txt'
             folder = self._folder('export', 'output_dir') if kind == 'edl' else self._folder('detect', 'timestamps_dir')
+            if kind == 'edl' and self.edl_path:
+                folder = str(Path(self.edl_path).parent)
             target = filedialog.asksaveasfilename(parent=self, title='Export selected highlights', initialdir=folder,
-                                                 initialfile=Path(media.path).stem + suffix, defaultextension=Path(suffix).suffix)
+                                                 initialfile=Path(self.edl_path).name if kind == 'edl' and self.edl_path else Path(media.path).stem + suffix, defaultextension=Path(suffix).suffix)
             if not target:
                 return
         sequence = self.saved_values['export', 'name']
         fps = config.section(self.cfg, 'export').get('fps')
         def save():
             if kind == 'mp4':
-                outputs.render_clips(media.path, clips, target)
+                return outputs.render_clips(media.path, clips, target,
+                    cancelled=self.jobs.cancel.is_set,
+                    progress=lambda *args: self.jobs.events.put(('render_progress', args, None)))
             else:
                 outputs.validate_paths([media.path], [target])
                 if kind == 'edl':
@@ -573,32 +671,22 @@ class Application(Views, tk.Tk):
                 else:
                     outputs.atomic_text(target, export.format_timestamps(clips))
             return target
+        self.export_kind = kind
         self.exporting_ids = set(self.table.selection())
-        self._begin('export', 'Exporting selected highlights… MP4 encoding can take a while.')
-        self.jobs.submit('export', save)
+        self.render_ids = sorted(self.exporting_ids, key=int)
+        job = 'render' if kind == 'mp4' else 'export'
+        if kind == 'mp4':
+            self.show('workspace')
+            self.progress['value'] = 0
+        self._begin(job, 'Exporting selected highlights… Press Escape or Stop to cancel MP4 rendering.')
+        self.jobs.submit(job, save)
 
-    def inspect_pixel(self, x, y, rgb):
-        if not self.state.media:
+    def check_updates(self):
+        if self.working:
             return
-        self.sample = {'version': 1, 'source': self.state.media.path, 'time_seconds': self.frame_time,
-                       'frame_width': self.state.media.width, 'frame_height': self.state.media.height,
-                       'x': x, 'y': y, 'rgb': list(rgb)}
-        self.pixel_hex = '#%02X%02X%02X' % tuple(rgb[:3])
-        self.pixel_info.configure(text=f'X {x}   /   Y {y}     ·     RGB {rgb[0]}, {rgb[1]}, {rgb[2]}     ·     {self.pixel_hex}')
-        self.pixel_swatch.configure(bg=self.pixel_hex)
-        self._update_controls()
-
-    def save_sample(self):
-        if not self.sample:
-            return
-        path = filedialog.asksaveasfilename(parent=self, title='Save pixel sample', defaultextension='.json', initialfile='pixel-sample.json')
-        if path:
-            try:
-                outputs.validate_paths([self.state.media.path], [path])
-                outputs.atomic_text(path, json.dumps(self.sample, indent=2) + '\n')
-                self.status.set(f'Pixel sample saved · {path}')
-            except Exception as exc:
-                self.error('Could not save sample', str(exc))
+        from . import updates
+        self._begin('updates', 'Checking official releases…')
+        self.jobs.submit('updates', updates.check)
 
     def check_environment(self):
         if self.working:
@@ -613,7 +701,15 @@ class Application(Views, tk.Tk):
         dialog.configure(bg=t.BG)
         dialog.geometry('720x500')
         dialog.transient(self)
-        checks.append(environment.Check('FFmpeg', bool(shutil.which('ffmpeg')), shutil.which('ffmpeg') or 'Not found · required only for MP4 rendering', required=False))
+        from .playback import library_path
+        import ctypes
+        try:
+            ctypes.CDLL(library_path())
+            playback_ok = True
+        except OSError:
+            playback_ok = False
+        checks.append(environment.Check('Audio/video playback', playback_ok, 'libmpv available' if playback_ok else 'Install libmpv or set KILLCUTTER_MPV to its library path', required=False))
+        checks.append(environment.Check('FFmpeg', bool(shutil.which('ffmpeg')), shutil.which('ffmpeg') or 'Not found · required for MP4 rendering and audio detection', required=False))
         text = tk.Text(dialog, bg=t.CARD, fg=t.INK, relief='flat', padx=20, pady=20, wrap='word', font=(self.family, 11))
         scrollbar = ttk.Scrollbar(dialog, command=text.yview)
         scrollbar.pack(side='right', fill='y')
@@ -673,13 +769,6 @@ class Application(Views, tk.Tk):
             swatch.configure(highlightbackground=t.INK if color == self.prefs.accent else t.CARD,
                              width=t.px(30), height=t.px(30))
 
-    def copy_pixel(self):
-        if not self.pixel_hex:
-            return
-        self.clipboard_clear()
-        self.clipboard_append(self.pixel_hex)
-        self.status.set(f'Copied {self.pixel_hex} to the clipboard.')
-
     def choose_accent(self):
         from tkinter import colorchooser
         chosen = colorchooser.askcolor(color=self.accent_var.get(), parent=self, title='Accent colour')[1]
@@ -728,10 +817,10 @@ class Application(Views, tk.Tk):
         self.status.set('Recent recordings cleared.')
 
     def show_shortcuts(self):
-        rows = [('Ctrl+O', 'Open a recording'), ('Ctrl+Enter', 'Analyze the selected range'),
+        rows = [('Space', 'Play or pause video with audio (Recording)'), ('Ctrl+O', 'Open a recording'), ('Ctrl+Enter', 'Analyze the selected range'),
                 ('Esc', 'Stop analysis, keeping partial results'),
-                ('Ctrl+1 … Ctrl+4', 'Recording / Highlights / Inspector / Settings'),
-                ('Ctrl+F', 'Search highlights by player'),
+                ('Ctrl+1 … Ctrl+4', 'Recording / Highlights / Presets / Settings'),
+                ('Ctrl+F', 'Search highlights by label'),
                 ('Ctrl+A', 'Select all visible highlights (in the table)'),
                 ('Enter', 'Preview the selected highlight'),
                 ('F2', 'Rename the selected highlight'),
@@ -845,9 +934,13 @@ class Application(Views, tk.Tk):
         messagebox.showerror(title, message, parent=self)
 
     def close(self):
+        if self.player:
+            self.stop_playback()
+            self.after(100, self.close)
+            return
         if self.working:
-            if self.working == 'scan':
-                if messagebox.askyesno('Stop analysis?', 'Stop the scan and keep this window open to review partial highlights?', parent=self):
+            if self.working in ('scan', 'render', 'batch'):
+                if messagebox.askyesno('Stop current operation?', 'Stop and keep this window open to review completed work?', parent=self):
                     self.stop_scan()
             else:
                 messagebox.showinfo('Work in progress', 'Wait for the current operation to finish before closing.', parent=self)
@@ -858,6 +951,7 @@ class Application(Views, tk.Tk):
         self._save_preferences()
         if self.seek_timer:
             self.after_cancel(self.seek_timer)
+        self.after_cancel(self.library_tick)
         self.after_cancel(self.poll_timer)
         self.jobs.close()
         self.destroy()

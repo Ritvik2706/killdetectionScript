@@ -7,7 +7,7 @@ bound. Nothing here reads preferences directly: the shell passes values in.
 """
 import tkinter.font as font
 from tkinter import ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 from .surfaces import rounded_surface
 
 # Role names, in the order palettes declare them.
@@ -160,7 +160,140 @@ def apply(root):
                          border=10, padding=0, sticky='nsew')
     style.layout('TEntry', [('Rounded.field', {'sticky': 'nsew', 'children': [
         ('Entry.padding', {'sticky': 'nsew', 'children': [('Entry.textarea', {'sticky': 'nsew'})]})]})])
+    style.configure('TCombobox', fieldbackground=FIELD, background=FIELD, foreground=INK,
+                    arrowcolor=MUTED, bordercolor=BORDER, padding=px(9), arrowsize=px(16))
+    style.map('TCombobox', fieldbackground=[('disabled', CARD), ('readonly', FIELD)],
+              foreground=[('disabled', MUTED), ('readonly', INK)],
+              selectbackground=[('readonly', FIELD)], selectforeground=[('readonly', INK)])
+    # A plain chevron avoids clam's bright, beveled arrow button.
+    arrows = []
+    for color in (MUTED, ACCENT, BORDER):
+        icon = Image.new('RGBA', (px(24)*4, px(24)*4))
+        draw = ImageDraw.Draw(icon)
+        unit = icon.width / 24
+        draw.line([(8*unit, 10*unit), (12*unit, 14*unit), (16*unit, 10*unit)],
+                  fill=color, width=max(1, round(1.5*unit)), joint='curve')
+        arrows.append(ImageTk.PhotoImage(icon.resize((px(24), px(24)), Image.Resampling.LANCZOS), master=root))
+    root.surface_images.extend(arrows)
+    style.element_create('Themed.downarrow', 'image', arrows[0], ('disabled', arrows[2]),
+                         ('active', arrows[1]), ('pressed', arrows[1]))
+    style.layout('TCombobox', [('Rounded.field', {'sticky': 'nsew', 'children': [
+        ('Themed.downarrow', {'side': 'right', 'sticky': 'ns'}),
+        ('Combobox.padding', {'sticky': 'nsew', 'children': [
+            ('Combobox.textarea', {'sticky': 'nsew'})]})]})])
+    root.option_add('*TCombobox*Listbox.background', FIELD)
+    root.option_add('*TCombobox*Listbox.foreground', INK)
+    root.option_add('*TCombobox*Listbox.selectBackground', SELECTED)
+    root.option_add('*TCombobox*Listbox.selectForeground', INK)
+    root.option_add('*TCombobox*Listbox.font', base)
+    root.option_add('*TCombobox*Listbox.borderWidth', 0)
+    root.option_add('*TCombobox*Listbox.highlightThickness', 0)
+    root.option_add('*Menu.background', CARD)
+    root.option_add('*Menu.foreground', INK)
+    root.option_add('*Menu.activeBackground', SELECTED)
+    root.option_add('*Menu.activeForeground', INK)
+    root.option_add('*Menu.disabledForeground', MUTED)
+    root.option_add('*Menu.relief', 'flat')
+    root.option_add('*Menu.borderWidth', 0)
+    style.configure('TEntry', selectbackground=SELECTED, selectforeground=INK)
+    style.map('TEntry', foreground=[('disabled', MUTED)])
+    style.map('TCheckbutton', foreground=[('disabled', MUTED)],
+              indicatorbackground=[('disabled', BORDER), ('selected', ACCENT), ('active', BORDER)])
+    checks = []
+    for selected, disabled, hover in [(False, False, False), (True, False, False),
+                                       (False, True, False), (True, True, False),
+                                       (False, False, True)]:
+        unit = px(20) * 4 / 20
+        icon = Image.new('RGBA', (px(20)*4, px(20)*4), CARD)
+        draw = ImageDraw.Draw(icon)
+        fill = BORDER if disabled else ACCENT if selected else FIELD
+        outline = ACCENT if hover else fill if selected else BORDER
+        draw.rounded_rectangle((2*unit, 2*unit, 18*unit, 18*unit), radius=4*unit,
+                               fill=fill, outline=outline, width=max(1, round(unit)))
+        if selected:
+            draw.line([(6*unit, 10*unit), (9*unit, 13*unit), (14*unit, 7*unit)],
+                      fill=MUTED if disabled else ON_ACCENT, width=round(2*unit), joint='curve')
+        checks.append(ImageTk.PhotoImage(icon.resize((px(20), px(20)), Image.Resampling.LANCZOS), master=root))
+    root.surface_images.extend(checks)
+    style.element_create('Themed.indicator', 'image', checks[0],
+                         ('disabled selected', checks[3]), ('disabled', checks[2]),
+                         ('selected', checks[1]), ('active', checks[4]), ('focus', checks[4]))
+    style.layout('TCheckbutton', [('Checkbutton.padding', {'sticky': 'nswe', 'children': [
+        ('Themed.indicator', {'side': 'left'}),
+        ('Checkbutton.focus', {'side': 'left', 'sticky': 'w', 'children': [
+            ('Checkbutton.label', {'sticky': 'nswe'})]})]})])
+    _themed_tracks(root, style)
+    def refresh_popdowns(widget):
+        if isinstance(widget, ttk.Combobox):
+            style_popdown(widget)
+        for child in widget.winfo_children():
+            refresh_popdowns(child)
+    refresh_popdowns(root)
     return family
+
+
+def style_popdown(combo):
+    """Tk owns the popup outside the Python widget tree; refresh it explicitly."""
+    popup = combo.tk.call('ttk::combobox::PopdownWindow', str(combo))
+    combo.tk.call(str(popup) + '.f.l', 'configure', '-background', FIELD,
+                  '-foreground', INK, '-selectbackground', SELECTED,
+                  '-selectforeground', INK, '-font', (FAMILY, size(10)),
+                  '-borderwidth', px(8), '-relief', 'flat', '-highlightthickness', 0)
+    combo.tk.call(str(popup) + '.f', 'configure', '-style', 'Dropdown.TFrame')
+    ttk.Style(combo).configure('Dropdown.TFrame', background=FIELD, bordercolor=BORDER,
+                               relief='solid', borderwidth=1)
+
+
+def _themed_tracks(root, style):
+    """Rounded controls with long image centers to keep Tk tiling inexpensive."""
+    for orient in ('Horizontal', 'Vertical'):
+        horizontal = orient == 'Horizontal'
+        width, height = (px(128), px(10)) if horizontal else (px(10), px(128))
+        thumbs = [ImageTk.PhotoImage(
+            rounded_surface(width, height, px(5), color), master=root)
+            for color in (BORDER, _mix(MUTED, BORDER, .5), ACCENT, FIELD)]
+        root.surface_images.extend(thumbs)
+        thumb = orient + '.Rounded.Scrollbar.thumb'
+        style.element_create(thumb, 'image', thumbs[0], ('disabled', thumbs[3]),
+                             ('pressed', thumbs[2]), ('active', thumbs[1]),
+                             border=px(5), width=px(24) if horizontal else px(10),
+                             height=px(10) if horizontal else px(24), sticky='nsew')
+        # The default trough respects borderwidth=0; clam draws an inset rim.
+        style.element_create(orient + '.Scrollbar.trough', 'from', 'default')
+        style.layout(orient + '.TScrollbar', [(orient + '.Scrollbar.trough', {
+            'sticky': 'nswe', 'children': [(thumb, {
+                'sticky': 'nswe', 'expand': '1'})]})])
+        style.configure(orient + '.TScrollbar', background=BORDER, troughcolor=CARD,
+                        bordercolor=CARD, lightcolor=BORDER, darkcolor=BORDER,
+                        borderwidth=0, relief='flat', arrowsize=px(8), gripcount=0)
+        style.map(orient + '.TScrollbar',
+                  background=[('disabled', CARD), ('pressed', ACCENT), ('active', MUTED)],
+                  lightcolor=[('pressed', ACCENT), ('active', MUTED)],
+                  darkcolor=[('pressed', ACCENT), ('active', MUTED)])
+        # Page scrollbars sit on the canvas, while table scrollbars sit on cards.
+        style.configure('Page.' + orient + '.TScrollbar', troughcolor=BG,
+                        bordercolor=BG)
+
+    # Wide source images avoid repeating a tiny center thousands of times.
+    track = ImageTk.PhotoImage(rounded_surface(px(256), px(18), px(9), FIELD), master=root)
+    root.surface_images.append(track)
+    style.element_create('Rounded.Scale.trough', 'image', track,
+                         border=px(9), width=px(24), sticky='ew')
+    handles = [ImageTk.PhotoImage(rounded_surface(px(18), px(18), px(8), color), master=root)
+               for color in (ACCENT, BORDER, ACCENT_ACTIVE, INK)]
+    root.surface_images.extend(handles)
+    style.element_create('Themed.slider', 'image', handles[0], ('disabled', handles[1]),
+                         ('pressed', handles[2]), ('focus', handles[3]), ('active', handles[2]))
+    style.configure('Horizontal.TScale', background=CARD, troughcolor=FIELD,
+                    bordercolor=CARD, lightcolor=CARD, darkcolor=CARD, borderwidth=0)
+    style.map('Horizontal.TScale', background=[('disabled', CARD)],
+              bordercolor=[('disabled', CARD)], lightcolor=[('disabled', CARD)],
+              darkcolor=[('disabled', CARD)])
+    style.layout('Horizontal.TScale', [('Rounded.Scale.trough', {'sticky': 'ew', 'children': [
+        ('Themed.slider', {'side': 'left', 'sticky': ''})]})])
+    style.configure('Horizontal.TProgressbar', background=ACCENT, troughcolor=FIELD,
+                    bordercolor=CARD, lightcolor=ACCENT, darkcolor=ACCENT,
+                    borderwidth=0, thickness=px(8))
 
 
 def recolor(widget, mapping, family):
@@ -169,7 +302,8 @@ def recolor(widget, mapping, family):
     Only colors that came from the previous palette are replaced, so deliberate
     one-off colors (a status accent, a swatch) survive untouched.
     """
-    for option in ('bg', 'fg', 'highlightbackground', 'insertbackground', 'selectbackground'):
+    for option in ('bg', 'fg', 'highlightbackground', 'insertbackground', 'selectbackground', 'selectforeground',
+                   'activebackground', 'activeforeground', 'disabledforeground'):
         try:
             current = str(widget.cget(option))
         except Exception:

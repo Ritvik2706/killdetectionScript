@@ -69,13 +69,20 @@ only for MP4 rendering. Settings → Check environment reports dependencies.
    **Recent ▾** in the header reopens one of the last eight recordings; entries
    whose file has moved are shown as missing rather than silently failing.
    Scrub the slider to inspect frames; preview decoding runs off the UI thread.
-   The current foundation is a frame viewer, not a real-time video/audio player.
+   **Play / Pause / Stop**, the seek slider and volume control provide embedded
+   video/audio playback through libmpv. Space toggles playback in Recording.
+   Playback stops before analysis/export and when leaving Recording. On Linux,
+   install `libmpv` (Arch: `mpv`; Debian/Ubuntu: `libmpv-dev`). On Windows, set
+   `KILLCUTTER_MPV` to the full path of `mpv-2.dll`. Frame inspection remains
+   available without libmpv. Settings → Check environment reports its availability.
 2. Enter IN/OUT times or set them from the current frame. OUT includes that
    frame's nominal duration. Input accepts seconds, MM:SS, or HH:MM:SS.
-3. **Analyze** runs the existing ENEMY DOWNED detector in a worker. **Stop**
+3. Choose a **Detection preset** in Recording. **Analyze** runs its detector in a worker.
+   The built-in Warzone preset reads ENEMY DOWNED banners; custom text and colour
+   presets work with other games and general videos. See [Presets](PRESETS.md). **Stop**
    cooperatively stops at a sample boundary and keeps partial results in memory.
    The window stays open so you can review and export them. The live analysis
-   panel shows player names immediately, updates merged highlights in place,
+   panel shows detected labels immediately (player names for Warzone), updates merged highlights in place,
    and reports progress, elapsed time, scan position, and estimated time remaining.
    **Follow scan frames** updates the preview once per second; turn it off to
    reduce extra decoding work. The preview is sampled, not real-time playback.
@@ -83,8 +90,8 @@ only for MP4 rendering. Settings → Check environment reports dependencies.
 4. **Highlights** lists actual scan results. All are initially selected. Use
    Ctrl/Shift to change the selection, double-click to seek to a clip, or export
    selected rows as timestamps, a Premiere EDL, or H.264/AAC MP4 clips.
-   Search player names with Ctrl+F, click column headings to sort, and use
-   **Copy** for clipboard timestamps. Filter by **All kills**, **Real players**,
+   Search event labels with Ctrl+F, click column headings to sort, and use
+   **Copy** for clipboard timestamps. Warzone results can filter by **All kills**, **Real players**,
    **Bots**, or **Undetermined**; the sortable **Kill type** column shows each
    verdict. Real-player and bot filters include undetermined kills by default;
    uncheck **Include undetermined kills** for confirmed matches only. A merged
@@ -108,10 +115,11 @@ only for MP4 rendering. Settings → Check environment reports dependencies.
    used. The desktop's default output folders are under `~/Videos/Killcutter`;
    choose other locations with the folder pickers. The working directory of a
    packaged executable is not used as the default export destination.
-6. **Frame inspector** maps a click through the letterboxed preview into the
-   original frame's X/Y coordinates, RGB value and hex, with a colour swatch and
-   **Copy colour**. Save this as versioned JSON. Samples are inspection data;
-   they do not yet modify detection rules.
+6. **New preset…** starts by choosing a sample video. Scrub the timeline, step
+   through frames, or enter a timestamp. Then choose the detection type and draw
+   an area or pick a pixel colour directly on the picture. Name it and click
+   **Save & use preset**. Detailed thresholds are under **Advanced settings**.
+   The active analysis preset is visible above every page.
 
 ## Appearance and session state
 
@@ -135,7 +143,25 @@ geometry and page are written on close.
 Analysis, frame decoding, environment checks, and export happen in workers.
 Only the Tk thread owns widgets and image handles. EDL/timestamps are atomic,
 and MP4 output is replaced only after a successful render. Closing is deferred
-while an export finishes; MP4 rendering does not yet have a cancel control.
+while work finishes. **Stop** or Escape cancels MP4 encoding, terminates the
+encoder, removes its partial temporary file, and keeps completed exports. Only
+completed clips are marked exported; existing files survive an interrupted replacement.
+
+## Preset library
+
+**Presets** (Ctrl+3) creates, edits, imports, and exports saved JSON recipes.
+The built-in Warzone preset is ready to use and protected from editing or deletion.
+Custom recipes support text, colour, motion, scene changes, and audio levels.
+Use **New preset…** or **Edit preset…** for guided setup from a sample
+video. Picking a colour preserves the selected region. **Save & use preset**
+saves and selects it for analysis. Precise pixel controls and optional thresholds
+live inside this guided editor. The tab shows a short summary instead of a second
+editable form. **More** contains Rename, Duplicate, Export preset file, and Delete
+for saved custom presets.
+
+Selecting a saved preset or saving your edits changes the next scan. Existing results retain a
+snapshot of their original recipe, name, and capabilities; player/bot filters
+only appear for Warzone results. Colour analysis works without Tesseract.
 
 ## Keyboard shortcuts
 
@@ -143,9 +169,10 @@ while an export finishes; MP4 rendering does not yet have a cancel control.
 |---|---|
 | Ctrl+O | Open a recording |
 | Ctrl+Enter | Analyze the selected range |
-| Escape | Stop analysis and keep partial results |
-| Ctrl+1 / 2 / 3 / 4 | Recording / Highlights / Inspector / Settings |
-| Ctrl+F | Search highlights by player |
+| Escape | Stop analysis or MP4 encoding and keep completed work |
+| Space in Recording | Play/pause audio and video |
+| Ctrl+1 / 2 / 3 / 4 | Recording / Highlights / Presets / Settings |
+| Ctrl+F | Search highlights by label |
 | Ctrl+A in the highlights table | Select all visible highlights |
 | Enter in the highlights table | Preview the selected highlight |
 | F2 in the highlights table | Rename the selected highlight |
@@ -164,13 +191,20 @@ Build on each target OS; a Linux/WSL build cannot produce a Windows executable.
 
 ```bash
 python -m pip install -e ".[gui,build]"
-python tools/build_desktop.py
+python tools/build_desktop.py --installer
 ```
 
 The portable app folder is `dist/KillcutterStudio`. On Windows, open
 `KillcutterStudio.exe`; on Linux, open `KillcutterStudio`. Keep the executable
 and `_internal` folder together. Python, Tk, and Python dependencies are bundled.
-Tesseract and FFmpeg are external dependencies in this foundation.
+To include native dependencies, build with
+`python tools/build_desktop.py --installer --runtime-dir /path/to/runtime`.
+That directory can contain FFmpeg, Tesseract, libmpv, supporting DLLs/shared
+libraries, `tessdata/`, and third-party notices. PyInstaller collects binary
+dependencies; the app discovers the included tools at startup. Explicit user
+environment overrides are preserved. Without a runtime directory, the app uses
+installed system tools. Prepare runtimes on the target OS; the local development
+Linux bundle is not a substitute for a Windows runtime package.
 
 `.github/workflows/desktop.yml` runs the core tests, GUI integration tests, and
 native packaging on Windows and Ubuntu. It uploads separate portable folders;
@@ -178,9 +212,17 @@ it does not publish a release. Linux binaries inherit the build machine's libc
 requirements: prefer the Ubuntu CI build for distribution rather than an Arch
 build. CI is configured but must run on GitHub to establish Windows results.
 
-This is a working development foundation, not a signed commercial installer.
-Installer integration, bundled external tools, application updates, and video
-playback can be added without replacing the detection engine.
+`--installer` also produces a Linux archive with a per-user `install.sh`, or a
+Windows installer when Inno Setup 6 is installed. Windows installation creates
+Start-menu shortcuts and an uninstaller without requiring administrator rights.
+The Linux script installs the app and a desktop launcher under the user data
+folder. Native installer artifacts are built in CI; Windows execution still
+requires verification on Windows. Signing is not configured.
+
+Settings → **Check for updates** checks this repository's latest public GitHub
+release on request. It opens the releases page with consent; it never downloads
+or executes an update automatically. Before a release exists it reports that
+clearly. Offline/network errors leave the installed application untouched.
 
 ## Extension points
 
@@ -193,14 +235,18 @@ playback can be added without replacing the detection engine.
 | `gui/surfaces.py` | Bounded corner cache and antialiased surface rendering |
 | `gui/widgets.py` | Reusable cards, preview canvas and scrollable forms |
 | `gui/state.py` | Media/workspace models and pure image-coordinate mapping |
+| `presets.py` | Validated, versioned recipe model and atomic JSON persistence |
+| `generic_detection.py` | General text/colour matching and event scanning |
+| `gui/preset_views.py` | Preset selection, editing, import and export |
+| `gui/playback.py` / `gui/playback_views.py` | Embedded libmpv transport with native audio/video synchronization |
+| `audio_detection.py` | Cancellable, bounded-memory FFmpeg audio level sampling |
+| `gui/updates.py` | Explicit read-only check of official releases |
 | `gui/services.py` | Job lifecycle, frame loading and detection reporter adapter |
 | `detection.py` | Existing engine, now with an optional cooperative cancellation callback |
 
-For custom detectors, introduce a versioned detection-profile model containing
-source dimensions, regions, sample points, color tolerances and matching rules.
-The inspector already produces source coordinates, so the profile UI does not
-need to understand screen scaling. Keep profile evaluation in the core and pass
-results through the same reporter; do not put pixel tests in widget callbacks.
+New detector implementations should consume a validated preset and return clips
+through the existing reporter contract. Keep Warzone-specific HUD geometry and
+trait probes out of general detectors. See [Preset architecture](PRESETS.md).
 
 ## Verification
 
@@ -217,3 +263,112 @@ python -m pytest tests/test_gui.py -q
 exercises import/seeking/live updates/compact layout/settings/inspection,
 removal and undo, and each theme at a scaled size, and saves window screenshots
 in a temporary directory. No game recording or OCR service is required for this test.
+
+Playback integration follows the [libmpv client API](https://github.com/mpv-player/mpv/blob/master/include/mpv/client.h).
+Release checks use [GitHub's latest release endpoint](https://docs.github.com/en/rest/releases/releases#get-the-latest-release).
+
+### Video library
+
+Click **Open recording** (or press **Ctrl+O**) to choose a video from the
+recording picker modal, with export status and metadata visible before opening it.
+It starts in the saved Recordings folder; choose another folder with **Browse…**.
+**Cancel**, **Escape**, or closing the dialog leaves your current page and recording
+intact. Select a row and click **Open recording**, or double-click it to open. This lists videos directly inside that folder (not
+subfolders). Search by filename, filter by export status, click column headings
+to sort, and double-click a recording to load it for preview and analysis.
+
+The list shows duration, size, and time since the file was last modified. Select
+a recording to see the exact save time and matching export paths. **Done** means
+`<recording>_highlights.edl` or `<recording>.edl` exists in the configured EDL
+folder. **Timestamps** means `<recording>_timestamps.txt` exists in the configured
+Timestamps folder without a matching EDL; otherwise the status is **Pending**.
+Matching uses the recording filename without its extension, so recordings with
+the same stem share a match. Custom export names are not automatically matched.
+Done indicates file presence, not validation or a guarantee that every highlight
+was exported.
+
+Metadata loads in the background and is cached until the video changes. The
+visible library refreshes every 30 seconds; **Refresh** checks immediately.
+Exports and saved folder settings also trigger a refresh. Unreadable videos
+remain listed with an unavailable duration.
+
+### Reopen saved highlights
+
+Opening a recording automatically loads the newest matching EDL from the saved
+EDL directory into **Highlights**. Matching uses the EDL's `FROM CLIP NAME`
+comments, so custom and versioned filenames work. Files without source comments
+are discovered only under the recording's standard EDL names. Newest means the
+most recently modified file for this recording, not an EDL for another video.
+
+Use the EDL selector to switch versions, **Browse…** for another file, **Latest**
+to discover newly generated files, or **Reload** after editing an EDL externally.
+Player labels come from `COMMENT` lines; missing labels use numbered highlight
+names. The table uses source in/out timecodes. Existing preview, rename, trim,
+remove, and export actions work on imported highlights. Export EDL suggests the
+loaded filename, allowing you to update it or save another version. Switching
+files or reloading asks before replacing unsaved highlights.
+
+A complete EDL export becomes the selected EDL. Exporting only some highlights
+keeps the remaining unsaved results in view; the saved file is available in the
+selector. New analyses also stay in view until saved or replaced explicitly.
+
+Import supports non-drop-frame CMX video/audio-video cuts, including EDLs already
+produced by Killcutter. Transitions, separate audio events, and drop-frame EDLs
+show an error without replacing current results. Older EDLs use the recording's
+frame rate; new exports include a frame-rate comment for accurate reimport.
+Player/bot classifications are restored from metadata comments in new exports;
+legacy EDLs do not contain these classifications.
+
+### Create a preset from a video
+
+**New preset…** opens the video picker with an explanation of the setup steps.
+Choose a sample video, or **Use current recording**, then click **Choose frame**.
+In the wizard, scrub or enter a time to find a clear example. Continue to select
+the detection area, or choose colour detection and click **Pick a pixel colour**.
+Name the preset and select **Save & use preset**. You can go back to choose
+another frame before saving. Choosing a sample video leaves your current
+recording and highlights intact; cancelling does not create a preset.
+
+**Import preset file…** is for an existing preset JSON file, rather than a video.
+
+### Precise preset selection and OCR
+
+Choose **Text recognition (OCR)** to detect a phrase inside a selected area.
+Draw the area or enter **X, Y, Width, Height** in source pixels and click
+**Apply area**. Coordinates begin at zero at the video's top-left corner.
+The cropped preview shows the exact region used by detection.
+
+**Read selected area (OCR)** runs recognition on that frame in the background
+and displays the recognized text. **Use read text as phrase** fills the phrase
+field, which you can edit before saving. Matching ignores case and repeated
+spaces. Changing frames, detection modes, or regions clears the old readout.
+OCR requires local Tesseract; missing dependencies or timeouts are reported
+inside the editor without losing your draft.
+
+Colour detection reports the sampled pixel's coordinates, RGB values, and hex
+colour. Motion, scene-change, and audio-level detectors remain available with
+mode-specific controls. Use the frame buttons for individual-frame adjustments,
+**Use whole frame** to reset the area, and **Advanced settings** for thresholds
+and coverage.
+
+### Analyze several videos
+
+In **Open recording**, use Ctrl/Shift to select videos and choose **Add to analysis
+queue**. Review the list, then **Start queue**. The queue analyzes full recordings
+one at a time with the preset and saved settings captured when you start. Each
+result gets uniquely named EDL and timestamp files in the configured folders.
+Existing exports and the current recording workspace are preserved.
+
+The **Queue** button reopens the list. **Stop queue** stops the current analysis,
+saves returned partial highlights, and leaves pending videos for a later start.
+A failed video is listed with its error while subsequent videos continue. Use
+**Review results** on a finished row; results retained after a save failure can
+also be reviewed and exported manually. The queue is kept for this app session.
+
+### Application identity
+
+The shared icon in `killcutter/gui/assets` appears in the sidebar and Tk window
+icons. Desktop builds embed the Windows ICO and macOS ICNS; the Linux installer
+installs the PNG into the user's icon theme. Rebuild desktop distributions to
+include changed assets. The generation prompt and asset provenance are recorded
+in `killcutter/gui/assets/BRAND.md`.

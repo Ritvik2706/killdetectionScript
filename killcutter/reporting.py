@@ -31,12 +31,15 @@ class ConsoleReporter:
 
     def __init__(self, debug: bool = False):
         self.debug = debug
+        self.event_label = "KILL"
         # The live bar redraws with \r, which turns into thousands of lines when
         # stdout is a pipe or a log file. Only animate it for a real terminal.
         self.animate = sys.stdout.isatty()
 
     def begin(self, meta) -> None:
         s = meta.settings
+        if s.preset is not None and not s.preset.has_player_traits:
+            self.event_label = "EVENT"
         rows = [
             ui.kv("Source", meta.source, val_color=ui.WHITE),
             ui.kv("Format", f"{meta.fps:.2f} fps   ·   {format_clock(meta.duration)}"
@@ -66,7 +69,7 @@ class ConsoleReporter:
             return
         # CLEAR_LINE first, so a line that got shorter (terminal resized, a
         # suffix dropped) leaves no tail of the previous frame behind.
-        print(ui.CLEAR_LINE + self._bar(done, total, elapsed, duration, kills, done, eta),
+        print(ui.CLEAR_LINE + self._bar(done, total, elapsed, duration, kills, done, eta, label=self.event_label),
               end="\r", flush=True)
 
     def aborted(self, elapsed, duration, kills) -> None:
@@ -80,7 +83,7 @@ class ConsoleReporter:
     def kill(self, index, at, clip) -> None:
         print(
             ui.CLEAR_LINE
-            + ui.badge(f"KILL #{index}", bg=ui.GREEN) + " "
+            + ui.badge(f"{self.event_label} #{index}", bg=ui.GREEN) + " "
             + ui.paint(format_clock(at), ui.LIME, bold=True)
             + f"  {ui.paint('→', ui.DIM)}  "
             + ui.paint(f"{format_clock(clip.start)} – {format_clock(clip.end)}", ui.WHITE)
@@ -103,14 +106,14 @@ class ConsoleReporter:
     MIN_BAR = 6
 
     @classmethod
-    def _bar(cls, done, total, elapsed, duration, kills, tick, eta, width=None):
+    def _bar(cls, done, total, elapsed, duration, kills, tick, eta, width=None, label="KILL"):
         pct = done / max(total, 1)
         spin = ui.spinner_frame(tick)
         pct_s = ui.paint(f"{pct * 100:5.1f}%", ui.WHITE, bold=True)
         if kills:
-            tally = ui.badge(f"{kills} KILL{'S' if kills != 1 else ''}", bg=ui.GREEN)
+            tally = ui.badge(f"{kills} {label}{'S' if kills != 1 else ''}", bg=ui.GREEN)
         else:
-            tally = ui.paint("0 kills", ui.DIM)
+            tally = ui.paint(f"0 {label.lower()}s", ui.DIM)
 
         # (drop_rank, text) — lowest rank is given up first when space is tight.
         # The ETA goes before the clock, and the kill tally is kept longest.
@@ -139,7 +142,7 @@ class ConsoleReporter:
 # ── One-shot result / export renderers ──────────────────────────────────────────
 
 def detection_results(clips, dropped=(), require=(), exclude=(),
-                      keep_unknown=True) -> None:
+                      keep_unknown=True, event_label="kills") -> None:
     """Print the rule + RESULTS panel (or a 'no kills' note).
 
     When trait filters were asked for, every clip is accounted for: the kept
@@ -154,8 +157,8 @@ def detection_results(clips, dropped=(), require=(), exclude=(),
     print(ui.CLEAR_LINE + ui.rule(ui.DIM))
     if not clips and not dropped:
         print("  " + ui.badge("DONE", bg=ui.AMBER) + " "
-              + ui.paint("No kills detected.", ui.WHITE))
-        print("  " + ui.paint("Run 'killcutter diagnose' to see which check is failing.",
+              + ui.paint(f"No {event_label} detected.", ui.WHITE))
+        print("  " + ui.paint("Run 'killcutter diagnose' to see which check is failing." if event_label == "kills" else "Check the preset thresholds and selected region.",
                               ui.DIM))
         return
 

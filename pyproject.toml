@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "killcutter"
 version = "1.0.0"
-description = "Detect CoD kills from the ENEMY DOWNED banner and build a Premiere-ready highlight EDL."
+description = "Detect video events with reusable presets and export reviewable highlights."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -31,3 +31,6 @@ include = ["killcutter*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"killcutter.gui" = ["assets/*.png", "assets/*.ico", "assets/*.icns", "assets/BRAND.md"]

@@ -13,7 +13,7 @@ from .theme import ACCENTS, PALETTES
 MIN_SCALE, MAX_SCALE = 0.8, 1.6
 GEOMETRY = re.compile(r'^\d+x\d+([+-]\d+[+-]\d+)?$')
 HEX = re.compile(r'^#[0-9A-Fa-f]{6}$')
-PAGES = ('workspace', 'results', 'inspector', 'settings')
+PAGES = ('workspace', 'results', 'presets', 'settings')
 RECENT_LIMIT = 8
 
 
@@ -57,6 +57,8 @@ def load(cfg):
     geometry = values.get('geometry')
     if isinstance(geometry, str) and GEOMETRY.match(geometry):
         updates['geometry'] = geometry
+    if values.get('page') == 'inspector':
+        updates['page'] = 'presets'
     if values.get('page') in PAGES:
         updates['page'] = values['page']
     recents = values.get('recents')

@@ -8,7 +8,7 @@ from tkinter import ttk
 from killcutter import config
 from . import preferences
 from . import theme as t
-from .widgets import Card, Preview, ScrollForm, label
+from .widgets import RoundedTreeview, AutoScrollbar, Card, Preview, ScrollForm, label
 
 
 class Views:
@@ -37,6 +37,9 @@ class Views:
         for title, delta in [('−5 s', -5), ('−1 frame', -1), ('+1 frame', 1), ('+5 s', 5)]:
             ttk.Button(transport, text=title, width=8,
                        command=lambda d=delta: self.step(d, frames=abs(d) == 1)).pack(side='left', padx=(0, 5))
+        player_controls = tk.Frame(preview.content, bg=t.CARD)
+        player_controls.pack(fill='x', pady=(8, 0))
+        self.build_transport(player_controls)
         live = Card(page, padding=16)
         live.grid(row=0, column=1, sticky='nsew', pady=(0, 14))
         label(live.content, 'LIVE ANALYSIS', size=9, color=t.ACCENT, bold=True).pack(anchor='w')
@@ -45,17 +48,17 @@ class Views:
               wraplength=220, justify='left').pack(anchor='w', pady=(0, 12))
         label(live.content, textvariable=self.live_player, wraplength=210,
               justify='left', color=t.GREEN).pack(anchor='w', pady=(0, 10))
-        self.live_table = ttk.Treeview(live.content, columns=('player',), show='tree', height=3,
+        self.live_table = RoundedTreeview(live.content, columns=('player',), show='tree', height=3,
                                       selectmode='browse')
         self.live_table.column('#0', width=85, minwidth=85, stretch=False)
         self.live_table.column('player', width=120, minwidth=90)
         self.live_table.configure(show='tree headings')
         self.live_table.heading('#0', text='TIME')
-        self.live_table.heading('player', text='PLAYER')
+        self.live_table.heading('player', text='LABEL')
         self.live_table.pack(fill='both', expand=True)
-        live_scroll = ttk.Scrollbar(live.content, orient='horizontal', command=self.live_table.xview)
+        live_scroll = AutoScrollbar(live.content, orient='horizontal', command=self.live_table.xview)
         self.live_table.configure(xscrollcommand=live_scroll.set)
-        live_scroll.pack(fill='x')
+        live_scroll.pack(fill='x', pady=(t.px(6), 0))
         self.live_table.bind('<Double-1>', self.preview_live)
         self.live_table.bind('<<TreeviewSelect>>', self.describe_live)
         ttk.Checkbutton(live.content, text='Follow scan frames', variable=self.follow_scan).pack(anchor='w', pady=(10, 0))
@@ -79,8 +82,12 @@ class Views:
         ttk.Button(selection.content, text='Reset to full recording', command=self.full_range).pack(anchor='w', pady=(10, 0))
         action = Card(bottom)
         action.grid(row=0, column=1, sticky='nsew')
-        label(action.content, 'ENEMY DOWNED', size=9, color=t.ACCENT, bold=True).pack(anchor='w')
-        label(action.content, textvariable=self.analysis_title, size=18, bold=True).pack(anchor='w', pady=(8, 5))
+        label(action.content, 'DETECTION PRESET', size=9, color=t.ACCENT, bold=True).pack(anchor='w')
+        preset_row = tk.Frame(action.content, bg=t.CARD)
+        preset_row.pack(fill='x', pady=(8, 0))
+        self._preset_selector(preset_row).pack(side='left', fill='x', expand=True)
+        ttk.Button(preset_row, text='Manage…', command=lambda: self.show('presets')).pack(side='right', padx=(8, 0))
+        label(action.content, textvariable=self.analysis_title, size=16, bold=True).pack(anchor='w', pady=(8, 5))
         label(action.content, 'Scans the selected range locally.\nReview results before exporting.', color=t.MUTED, justify='left').pack(anchor='w')
         self.progress = ttk.Progressbar(action.content, maximum=100)
         self.progress.pack(fill='x', pady=(18, 12))
@@ -97,15 +104,16 @@ class Views:
         bar.pack(fill='x', pady=(0, 14))
         self.results_summary = label(bar.content, 'No highlights yet', size=20, bold=True)
         self.results_summary.pack(anchor='w')
-        label(bar.content, 'Analyze a recording, then select rows to preview or export. Ctrl / Shift selects multiple rows.',
+        label(bar.content, 'Load a saved EDL or analyze a recording, then select highlights to preview or export. Ctrl / Shift selects multiple rows.',
               color=t.MUTED, wraplength=720, justify='left').pack(anchor='w', pady=(6, 0))
+        self.build_edl_selector(bar.content)
         search = tk.Frame(bar.content, bg=t.CARD)
         search.pack(fill='x', pady=(14, 0))
-        label(search, 'Find player').pack(side='left', padx=(0, 10))
+        label(search, 'Find label').pack(side='left', padx=(0, 10))
         self.search_entry = ttk.Entry(search, textvariable=self.search_var)
         self.search_entry.pack(side='left', fill='x', expand=True)
         ttk.Button(search, text='Clear', command=lambda: self.search_var.set('')).pack(side='left', padx=(8, 0))
-        filters = tk.Frame(bar.content, bg=t.CARD)
+        filters = self.trait_filters = tk.Frame(bar.content, bg=t.CARD)
         filters.pack(fill='x', pady=(12, 0))
         self.filter_buttons = {}
         for key, title in [('all', 'All kills'), ('real-player', 'Real players'),
@@ -119,8 +127,8 @@ class Views:
                                             variable=self.keep_unknown)
         self.unknown_check.pack(anchor='w', pady=(8, 0))
         self.unknown_check.state(['disabled'])
-        label(bar.content, textvariable=self.filter_hint, size=9, color=t.MUTED,
-              wraplength=720, justify='left').pack(anchor='w', pady=(4, 0))
+        self.filter_hint_label = label(bar.content, textvariable=self.filter_hint, size=9, color=t.MUTED, wraplength=720, justify='left')
+        self.filter_hint_label.pack(anchor='w', pady=(4, 0))
         label(bar.content, textvariable=self.selected_var, color=t.MUTED).pack(anchor='w', pady=(10, 0))
         actions = tk.Frame(page, bg=t.BG)
         trim = tk.Frame(page, bg=t.BG)
@@ -128,11 +136,11 @@ class Views:
         actions.pack(side='bottom', fill='x', pady=(14, 0))
         well = Card(page)
         well.pack(fill='both', expand=True)
-        self.table = ttk.Treeview(well.content, columns=('player', 'type', 'in', 'out', 'duration'), show='headings', selectmode='extended')
-        for name, title, width in [('player', 'PLAYER / MOMENT', 210), ('type', 'KILL TYPE', 140), ('in', 'IN', 125), ('out', 'OUT', 125), ('duration', 'DURATION', 100)]:
+        self.table = RoundedTreeview(well.content, columns=('player', 'type', 'in', 'out', 'duration'), show='headings', selectmode='extended')
+        for name, title, width in [('player', 'LABEL / MOMENT', 210), ('type', 'KILL TYPE', 140), ('in', 'IN', 125), ('out', 'OUT', 125), ('duration', 'DURATION', 100)]:
             self.table.heading(name, text=title, command=lambda c=name: self.sort_results(c))
             self.table.column(name, width=width, minwidth=70, anchor='w', stretch=True)
-        scroll = ttk.Scrollbar(well.content, orient='vertical', command=self.table.yview)
+        scroll = AutoScrollbar(well.content, orient='vertical', command=self.table.yview)
         self.table.configure(yscrollcommand=scroll.set)
         scroll.pack(side='right', fill='y')
         self.table.pack(fill='both', expand=True)
@@ -168,32 +176,6 @@ class Views:
                                 command=lambda s=seconds, e=edge: self.adjust_selected(s, edge=e))
             button.pack(side='left', padx=(0, 6))
             self.result_buttons.append(button)
-
-    def _build_inspector(self):
-        page = self._page('inspector')
-        card = Card(page)
-        card.pack(fill='both', expand=True, pady=(0, 14))
-        label(card.content, 'SOURCE FRAME  /  CLICK A PIXEL', color=t.MUTED, size=9, bold=True).pack(anchor='w', pady=(0, 12))
-        self.inspector = Preview(card.content, on_pixel=self.inspect_pixel, height=300)
-        self.inspector.pack(fill='both', expand=True)
-        info = Card(page)
-        info.pack(fill='x')
-        top = tk.Frame(info.content, bg=t.CARD)
-        top.pack(fill='x')
-        self.pixel_swatch = tk.Frame(top, bg=t.FIELD, width=t.px(34), height=t.px(34),
-                                     highlightthickness=1, highlightbackground=t.BORDER)
-        self.pixel_swatch.pack(side='left', padx=(0, 12))
-        self.pixel_swatch.pack_propagate(False)
-        self.pixel_info = label(top, 'No pixel selected', size=18, bold=True)
-        self.pixel_info.pack(side='left')
-        label(info.content, 'Seek in Recording, then click a pixel here. Coordinates use the original video resolution.\nInspection is a calibration building block; saved samples do not change detection yet.',
-              color=t.MUTED, justify='left', wraplength=760).pack(anchor='w', pady=(8, 12))
-        buttons = tk.Frame(info.content, bg=t.CARD)
-        buttons.pack(anchor='w')
-        self.save_sample_button = ttk.Button(buttons, text='Save pixel sample…', command=self.save_sample)
-        self.save_sample_button.pack(side='left')
-        self.copy_pixel_button = ttk.Button(buttons, text='Copy colour', command=self.copy_pixel)
-        self.copy_pixel_button.pack(side='left', padx=8)
 
     def _build_settings(self):
         form = ScrollForm(self._page('settings'))
@@ -262,8 +244,8 @@ class Views:
         options = Card(form.body)
         options.pack(fill='x', pady=(0, 14))
         label(options.content, 'Detection defaults', size=20, bold=True).pack(anchor='w', pady=(0, 12))
-        for key, title, default in [('offset', 'Seconds before a kill', 5), ('end_offset', 'Seconds after a kill', 5),
-                                     ('merge_gap', 'Merge kills within (seconds)', 10), ('cooldown', 'Detection cooldown (seconds)', 3),
+        for key, title, default in [('offset', 'Seconds before an event', 5), ('end_offset', 'Seconds after an event', 5),
+                                     ('merge_gap', 'Merge events within (seconds)', 10), ('cooldown', 'Detection cooldown (seconds)', 3),
                                      ('rate', 'Samples per second', 4)]:
             row = tk.Frame(options.content, bg=t.CARD)
             row.pack(fill='x', pady=5)
@@ -274,7 +256,7 @@ class Views:
         row = tk.Frame(options.content, bg=t.CARD)
         row.pack(fill='x', pady=5)
         label(row, 'Premiere sequence name').pack(side='left')
-        sequence = tk.StringVar(value=config.section(self.cfg, 'export').get('name', 'Kill Highlights'))
+        sequence = tk.StringVar(value=config.section(self.cfg, 'export').get('name', 'Video Highlights'))
         self.setting_vars['export', 'name'] = sequence
         ttk.Entry(row, textvariable=sequence, width=24).pack(side='right')
         footer = Card(form.body)
@@ -283,4 +265,4 @@ class Views:
         label(footer.content, self.config_path, color=t.MUTED, wraplength=700, justify='left').pack(anchor='w', pady=(4, 12))
         ttk.Button(footer.content, text='Save settings', style='CardPrimary.TButton', command=self.save_settings).pack(side='left')
         ttk.Button(footer.content, text='Check environment', command=self.check_environment).pack(side='left', padx=10)
-
+        ttk.Button(footer.content, text='Check for updates', command=self.check_updates).pack(side='left')

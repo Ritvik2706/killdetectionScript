@@ -182,3 +182,22 @@ def test_detection_ignores_frames_before_start_and_bounds_highlights(monkeypatch
     assert clips == [Clip(20, 30, 'Player')]
     reporter.frame.assert_called_once_with(20, True)
     cap.release.assert_called_once()
+
+
+def test_cancellable_renderer_preserves_previous_output(monkeypatch, tmp_path):
+    monkeypatch.setattr(outputs.shutil, 'which', lambda _: '/usr/bin/ffmpeg')
+    target = tmp_path / 'source_highlight_001.mp4'
+    target.write_bytes(b'previous complete output')
+    monkeypatch.setattr(outputs, '_run_cancellable', lambda *args: None)
+    assert outputs.render_clips('source.mkv', [Clip(1, 3)], tmp_path, cancelled=lambda: False) == []
+    assert target.read_bytes() == b'previous complete output'
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_cancellable_process_is_terminated_and_reaped(monkeypatch):
+    process = Mock()
+    process.poll.return_value = -15
+    monkeypatch.setattr(outputs.subprocess, 'Popen', lambda *a, **kw: process)
+    assert outputs._run_cancellable(['ffmpeg'], lambda: True) is None
+    process.terminate.assert_called_once()
+    process.communicate.assert_called_once_with(timeout=2)

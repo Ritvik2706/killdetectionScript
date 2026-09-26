@@ -62,7 +62,7 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="killcutter",
-        description="Detect CoD kills and build a Premiere-ready highlight EDL.",
+        description="Detect video events and build a Premiere-ready highlight EDL.",
         parents=[common],
     )
     parser.add_argument("--version", action="version",
@@ -75,6 +75,7 @@ def _build_parser(cfg, common) -> argparse.ArgumentParser:
     # detect ---------------------------------------------------------------
     pd = sub.add_parser("detect", parents=[common],
                         help="Scan a video for kills, then build the highlight EDL")
+    pd.add_argument("--preset", help="Saved preset JSON file (default: built-in Warzone)")
     pd.add_argument("--video", help="Path to video (omit to pick from the clips folder)")
     pd.add_argument("--region", nargs=4, type=int, metavar=("X", "Y", "W", "H"),
                     default=cfg_region, help=f"Scan region override (default: {DEFAULT_REGION})")
@@ -188,13 +189,17 @@ def _clips_dir(cfg) -> str:
 # ── Commands ────────────────────────────────────────────────────────────────────
 
 def cmd_detect(args, cfg, cfg_path) -> int:
+    from killcutter import presets
+    preset = presets.load(args.preset) if getattr(args, 'preset', None) else presets.WARZONE
+    if not preset.has_player_traits and (args.require or args.exclude or args.drop_unknown):
+        raise ConfigError('Player/bot trait filters only apply to Warzone presets.')
     if args.interactive:
         from killcutter.ui.workspace import scan_setup
         args.no_export = args.no_export or not config.section(cfg, "detect").get("export", True)
         args = scan_setup(args, cfg)
         if args is None:
             return 0
-    reporting.banner("kill scan", cfg_path)
+    reporting.banner("event scan", cfg_path)
     video_path = args.video or video.pick(_clips_dir(cfg))
     args.output = args.output or (outputs.destination(video_path, args.timestamps_dir, "_timestamps.txt")
                                   if args.timestamps_dir else "timestamps.txt")
@@ -219,7 +224,7 @@ def cmd_detect(args, cfg, cfg_path) -> int:
         end_offset=args.end_offset, merge_gap=args.merge_gap,
         cooldown=args.cooldown, rate=args.rate,
         preview=args.preview, debug=args.debug,
-        traits=not args.no_traits,
+        traits=not args.no_traits and preset.has_player_traits, preset=preset,
     )
     reporter = reporting.ConsoleReporter(debug=args.debug)
     clips, completed = detection.detect(video_path, settings, reporter,
@@ -230,7 +235,8 @@ def cmd_detect(args, cfg, cfg_path) -> int:
     clips, dropped = traits_mod.select(clips, args.require, args.exclude,
                                        keep_unknown=not args.drop_unknown)
     reporting.detection_results(clips, dropped, args.require, args.exclude,
-                                keep_unknown=not args.drop_unknown)
+                                keep_unknown=not args.drop_unknown,
+                                event_label="kills" if preset.has_player_traits else "events")
     if not clips:
         return 0 if completed else 130
     if args.dry_run:

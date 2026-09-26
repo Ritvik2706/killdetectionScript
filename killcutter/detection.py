@@ -26,6 +26,7 @@ import pytesseract
 from killcutter import constants, hud as hud_mod, traits as traits_mod
 from killcutter.errors import ConfigError, DependencyError, VideoError
 from killcutter.models import Clip
+from killcutter.presets import Preset
 from killcutter.ranges import resolve_range
 
 
@@ -39,6 +40,7 @@ class DetectionSettings:
     rate: float = 2.0            # frame samples per second
     preview: bool = False
     debug: bool = False
+    preset: Preset | None = None       # None preserves the legacy Warzone CLI behavior
     traits: bool = True          # record per-kill traits (see killcutter.traits)
 
 
@@ -48,7 +50,7 @@ def validate(settings: DetectionSettings) -> None:
         raise ConfigError(f"--rate must be greater than 0 (got {settings.rate:g}).")
     if settings.rate > 60:
         raise ConfigError(f"--rate above 60 samples/sec is pointless (got "
-                          f"{settings.rate:g}); footage is 60fps at most.")
+                          f"{settings.rate:g}); choose 60 or fewer samples per second.")
     for name, value in (("--offset", settings.offset),
                         ("--end-offset", settings.end_offset),
                         ("--merge-gap", settings.merge_gap),
@@ -123,13 +125,13 @@ def _banner_visible(frame, hud=None) -> bool:
 
 # ── OCR + name merging ──────────────────────────────────────────────────────────
 
-def _ocr_lines(roi) -> list:
+def _ocr_lines(roi, *, timeout=0) -> list:
     """OCR the banner ROI and return its non-empty lines, in order."""
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     _, thresh = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     try:
-        text = pytesseract.image_to_string(thresh, config=constants.TESSERACT_CONFIG)
+        text = pytesseract.image_to_string(thresh, config=constants.TESSERACT_CONFIG, timeout=timeout)
     except (pytesseract.TesseractNotFoundError, OSError) as exc:
         from killcutter import environment
         raise DependencyError(
@@ -312,6 +314,12 @@ def detect(video_path, settings: DetectionSettings, reporter, *, dry_run=False,
     Raises :class:`VideoError` if the file can't be opened or has no frame rate.
     """
     validate(settings)
+    if settings.preset is not None:
+        settings.preset.validate()
+        if settings.preset.detector != 'warzone':
+            from .generic_detection import detect as detect_general
+            return detect_general(video_path, settings, reporter, dry_run=dry_run,
+                                  start=start, limit=limit, end=end, cancelled=cancelled)
     if not os.path.exists(video_path):
         raise VideoError(f"No such file: {video_path}")
 

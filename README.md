@@ -1,23 +1,30 @@
-# Killfeed Auto-Cutter
-Detect every kill in a CoD recording and assemble the highlights into a
-Premiere Pro–ready EDL — in one command.
+# Killcutter Studio
+Detect events in games and general videos, review the matching moments, and
+export timestamps, Premiere Pro EDLs, or video clips.
+
+Detection is driven by saved presets. **Call of Duty · Warzone** is the built-in
+recipe for its ENEMY DOWNED banner, player names, and player/bot traits. Create
+**text**, **colour**, **motion**, **scene-change**, or **audio-level** presets for other games, status indicators, title cards,
+or other visible signals. These are explicit visual rules, not a general-purpose
+AI object or action recognizer. See [Detection presets](docs/PRESETS.md).
 
 ## Desktop app
 
-The new **Killcutter Studio** desktop foundation runs on Linux and Windows:
+**Killcutter Studio** runs on Linux and Windows:
 
 ```bash
 .venv/bin/python -m killcutter.gui
 ```
 
 It includes frame preview and scrubbing, analysis range selection, background
-scanning, highlight review/export, folder settings, and a pixel inspector.
+scanning, audio/video playback, cancellable MP4 export, visual preset regions,
+highlight review/export, folder settings, and contextual preset frame tools.
 See [Desktop setup and architecture](docs/DESKTOP.md) for Windows launch commands,
 native packaging, and extension points. The terminal workflow below still works.
 
 ---
 
-## How it works
+## Warzone terminal workflow
 
 ```
 Your gameplay recording

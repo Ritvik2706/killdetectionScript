@@ -90,10 +90,36 @@ def main():
         capture(app, folder / 'compact-controls.png')
         form.canvas.yview_moveto(0)
         app.geometry('1320x860+30+30')
-        app.show('inspector')
-        app.inspect_pixel(100, 100, (30, 100, 180))
-        assert app.sample['x'] == 100
-        capture(app, folder / 'inspector.png')
+        from killcutter.gui.preset_wizard import PresetWizard
+        app.show('presets')
+        capture(app, folder / 'preset-library.png')
+        wizard = PresetWizard(app, str(source))
+        wizard.overrideredirect(True)
+        wizard.geometry('980x760+60+40')
+        pump(app, lambda: wizard.ready, 8)
+        assert wizard.ready
+        wizard.time_var.set('00:01.500')
+        wizard.go_to_time()
+        pump(app, lambda: wizard.ready, 8)
+        assert wizard.position == 1.5
+        capture(wizard, folder / 'preset-choose-frame.png')
+        wizard.next_step()
+        wizard.kind_var.set('A colour appears')
+        wizard.change_kind()
+        wizard.name_var.set('Blue indicator')
+        wizard.select_region((.1, .15, .65, .65))
+        wizard.select_pixel(150, 150, (30, 100, 180))
+        capture(wizard, folder / 'preset-setup.png')
+        wizard.geometry('720x600+60+40')
+        capture(wizard, folder / 'preset-setup-compact.png')
+        assert wizard.next_button.winfo_rooty() + wizard.next_button.winfo_height() < wizard.winfo_rooty() + wizard.winfo_height()
+        wizard.destroy()
+        app.new_preset('color')
+        picker = app.pick_preset_colour()
+        picker.select_pixel(100, 100, (30, 100, 180))
+        capture(picker, folder / 'preset-colour-picker.png')
+        picker.confirm()
+        assert app.preset_fields['color'].get() == '#1E64B4'
         app.show('results')
         app.table.selection_set('0')
         app.remove_selected()
@@ -114,15 +140,72 @@ def main():
             app.show('workspace')
             capture(app, folder / f'workspace-{theme.lower()}.png')
             app.show('settings')
+        app.new_preset('color')
+        app.preset_fields['name'].set('Blue rectangle')
+        app.preset_fields['label'].set('Rectangle visible')
+        app.preset_fields['color'].set('#1E64B4')
+        app.preset_fields['coverage'].set('5')
+        app.save_preset()
+        assert app.active_preset.detector == 'color'
+        capture(app, folder / 'presets.png')
+        app.exported = True
+        app.full_range()
+        app.start_scan()
+        pump(app, lambda: not app.working, 10)
+        assert not app.working and len(app.state.clips) == 1
+        assert app.state.clips[0].name == 'Rectangle visible'
+        assert not app.state.player_traits
+        assert 'type' not in app.table.cget('displaycolumns')
+        capture(app, folder / 'general-results.png')
         app.reset_appearance()
         pump(app, seconds=.3)
         print(f'PASS: import, frame seek, range, live merge, highlights, remove/undo, compact layout, '
-              f'inspector, saved settings, themes and scaling. Screenshots: {folder}')
+              f'preset colour picker, saved settings, themes, presets and real colour detection. Screenshots: {folder}')
     finally:
         app.exported = True
         app.working = None
         app.close()
 
 
+def controls():
+    import tkinter as tk
+    from tkinter import ttk
+    from killcutter.gui import theme as t
+    from killcutter.gui.widgets import Card, label
+    folder = Path(tempfile.mkdtemp(prefix='killcutter-controls-'))
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.geometry('700x480+40+60')
+    try:
+        for palette in t.PALETTES:
+            t.configure(palette, '#7D5BED', 1.0)
+            t.apply(root)
+            root.configure(bg=t.BG)
+            card = Card(root)
+            card.pack(fill='both', expand=True, padx=18, pady=18)
+            label(card.content, palette + ' · controls', size=20, bold=True).pack(anchor='w', pady=(0, 16))
+            ttk.Scale(card.content, from_=0, to=100, value=45).pack(fill='x', pady=10)
+            disabled = ttk.Scale(card.content, value=.4)
+            disabled.state(['disabled'])
+            disabled.pack(fill='x', pady=10)
+            ttk.Progressbar(card.content, value=65).pack(fill='x', pady=10)
+            scroll = ttk.Scrollbar(card.content, orient='horizontal')
+            scroll.pack(fill='x', pady=10)
+            scroll.set(.15, .55)
+            combo = ttk.Combobox(card.content, state='readonly', values=['Text appears', 'A colour appears', 'Movement', 'Scene changes', 'Loud sounds'])
+            combo.current(0)
+            combo.configure(postcommand=lambda c=combo: t.style_popdown(c))
+            combo.pack(fill='x', pady=10)
+            ttk.Checkbutton(card.content, text='Include undetermined kills').pack(anchor='w', pady=10)
+            capture(root, folder / (palette.lower() + '.png'))
+            root.tk.call('ttk::combobox::Post', str(combo))
+            capture(root, folder / (palette.lower() + '-dropdown.png'))
+            root.tk.call('ttk::combobox::Unpost', str(combo))
+            card.destroy()
+        print(f'Controls screenshots: {folder}')
+    finally:
+        root.destroy()
+
+
 if __name__ == '__main__':
-    main()
+    controls() if '--controls' in sys.argv else main()

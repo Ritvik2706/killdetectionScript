@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from killcutter.models import Clip
+from killcutter.presets import Preset
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,10 @@ class Workspace:
     clips: list[Clip] = field(default_factory=list)
     completed: bool = False
     position: float = 0
+    preset: Preset | None = None
+    preset_id: str = "warzone"
+    preset_name: str = "Call of Duty · Warzone"
+    player_traits: bool = True
 
 
 def image_rect(source_width, source_height, width, height):

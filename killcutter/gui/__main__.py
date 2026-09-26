@@ -4,6 +4,8 @@ import sys
 
 
 def main(argv=None):
+    from .runtime import configure
+    configure()
     import argparse
     parser = argparse.ArgumentParser(description="Killcutter Studio desktop")
     parser.add_argument("--config", help="Use a specific TOML settings file")
@@ -23,6 +25,7 @@ def main(argv=None):
     if os.name == 'nt':
         try:
             import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Killcutter.Studio')
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except (AttributeError, OSError):
             pass
